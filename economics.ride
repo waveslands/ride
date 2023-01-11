@@ -1,0 +1,207 @@
+{-# STDLIB_VERSION 6 #-}
+{-# CONTENT_TYPE DAPP #-}
+{-# SCRIPT_TYPE ACCOUNT #-}
+
+# https://www.mathcha.io/editor/Dq3mYFy7UqlHl4FqkZMkWh2BQZDvtyEZPMgTxVj0rp
+
+let MULT6 = 1_000_000
+let MULT8 = 1_0000_0000
+let MULT10 = 100_0000_0000
+let chain = this.bytes.drop(1).take(1).toUtf8String()
+let usdnAssetId = match(chain) {
+    case "W" => base58'DG2xFkPdDwKUoBkzGAhQtLpSGzfXLiCYPEzeKH2Ad24p'
+    case "T" => base58'HezsdQuRDtzksAYUy97gfhKy7Z1NW2uXYSHA3bgqenNZ'
+    case _ => throw("Unknown chain")
+  }
+let stakingContract = addressFromStringValue(match(chain) {
+    case "W" => "3PLncXtS1U83D6cQbFD3H8rBHPLgzxSFKZ1"
+    case "T" => "3NDCyBG5q85JuaRiigUeEtainyjCQT3XpZm"
+    case _ => throw("Unknown chain")
+  })
+let DEFAULTLOCATION = "Africa_F_Africa"
+let NUMRES = 6
+let FACTORYMAXWAREHOUSE = 100_0000_0000 # 100 material for each type
+let RESOURCEPRICEMIN = 158549 # 0.158549 // 0.03456000 * 25 * 0.158549 = 0.136986336 USDN (20% APR)
+let MINPAYMENT = 10000 # 1 cent
+
+let resTypes = ["Oil", "Ore", "Wood", "Sand", "Clay", "Organic"]
+let matTypes = ["Fuel", "Metal", "Plank", "Glass", "Plastic", "Protein"]
+let continents = ["Americas", "Europe", "Asia", "Africa", "Oceania"]
+func keyFactoryWarehouseByIdAndType(factoryId: String, resType: Int) = "factoryWhByContinentAndRes_" + factoryId + "_" + resType.toString()
+# staking contract keys:
+func keyStakedDuckByOwner(ownerAddr: String) = "stakedDuckByOwner_" + ownerAddr
+func keyBackpackByDuck(duckAssetId: String) = "backPack_" + duckAssetId
+func keyDuckLocation(duckAssetId: String) = "duckLocation_" + duckAssetId
+
+let locIdxContinent = 0
+let locIdxType = 1
+let locIdxId = 2
+
+# backpack groups:
+let bpIdxLevel = 0 # upgradeLevel
+let bpIdxRes = 1 # resList
+let bpIdxMat = 2 # matList
+let bpIdxProd = 3 # prodList
+
+func asString(v: Any) = {
+  match v {
+    case s: String => s
+    case _ => throw("fail to cast into String")
+  }
+}
+
+# decrease one element resList[resType] by amount, keep other elements
+func subRes(resList: List[String], resType: Int, amount: Int) = {
+
+  func subber(acc: List[String], i: Int) = {
+    acc :+ if (i == resType) then (resList[i].parseIntValue() - amount).toString() else resList[i]
+  }
+  let r = FOLD<6>([0, 1, 2, 3, 4, 5], [], subber)
+  r.makeString("_")
+}
+
+# increase one element matList[matType] by amount, keep other elements
+func addMat(matList: List[String], matType: Int, amount: Int) = {
+
+  func increaser(acc: List[String], i: Int) = {
+    acc :+ if (i == matType) then (matList[i].parseIntValue() + amount).toString() else matList[i]
+  }
+  let m = FOLD<6>([0, 1, 2, 3, 4, 5], [], increaser)
+  m.makeString("_")
+}
+
+# sell single resource to factory
+# Пусть r - количество ресурсов, продаваемых заводу
+# w0 - текущее к-во материалов на складе, W = FACTORYMAXWAREHOUSE - макс. объем склада
+# Найдем, какая часть ресурса (r0) будет продана по динамической цене, а какая (r1) по минимальной:
+# if (w0 > W) then r0 = 0 // склад переполнен, все уйдет по минималке
+# else if (w0 <= W && w0 + r > W) then r0 = W - w0 // часть до заполнения склада
+# else r0 = r // нормальный случай w0 + r <= W, динамическая цена
+# r1 = r - r0 (лишние ресурсы будут куплены заводом по минимальной цене и свалены вне склада)
+# usdnReceived = (r0 * (2 - (w0 + r0/2) / W) + r1) * RESOURCEPRICEMIN
+# wnew = w0 + r
+func sellInternal(locId: String, resType: Int, amount: Int, minPrice: Int) = {
+  let whKey = keyFactoryWarehouseByIdAndType(locId, resType)
+  let w0 = getInteger(whKey).valueOrElse(0)
+  let r0 = if (w0 > FACTORYMAXWAREHOUSE) then 0 else if (w0 + amount > FACTORYMAXWAREHOUSE) then FACTORYMAXWAREHOUSE - w0 else amount
+  let usdnReceived = fraction(r0, 2 * RESOURCEPRICEMIN - fraction(w0 + r0 / 2, RESOURCEPRICEMIN, FACTORYMAXWAREHOUSE), MULT8)
+    + fraction(amount - r0, RESOURCEPRICEMIN, MULT8)
+
+  let min99 = minPrice - minPrice / 100 # 1% tolerance allowed
+  if (usdnReceived * MULT8 < min99 * amount) then throw("Actual price = " + usdnReceived.toString() + " / " + amount.toString()
+    + " < minPrice = " + minPrice.toString() + ", (" + locId + ", " + resTypes[resType] + ")") else
+
+  (IntegerEntry(whKey, w0 + amount), usdnReceived) # warehouse action, usdnReceived; (resAmountSold always == amount)
+}
+
+# buy single material from factory
+# Пусть m - количество материалов, покупаемых у завода
+# w0 - текущее к-во материалов на складе, W = FACTORYMAXWAREHOUSE - макс. объем склада
+# Найдем, какая часть материалов (m1) будет куплена по минимальной цене, а какая (m0) по динамической:
+# if (w0 > W) then m1 = min(m, w0-W) // склад переполнен, превышающая часть уйдет по минималке
+# else m1 = 0
+# m0 = min(w0, m - m1) // часть по динамической цене
+# usdnSpent = (m0 * (3 - (w0 - m0/2) / W) + 2 * m1) * RESOURCEPRICEMIN
+# wnew = w0 - (m0 + m1)
+func buyInternal(locId: String, matType: Int, amount: Int, maxPrice: Int) = {
+  let whKey = keyFactoryWarehouseByIdAndType(locId, matType)
+  let w0 = getInteger(whKey).valueOrElse(0)
+  let m1 = if (w0 > FACTORYMAXWAREHOUSE) then min([amount, w0 - FACTORYMAXWAREHOUSE]) else 0
+  let m0 = min([w0, amount - m1])
+  let m = m0 + m1
+  let usdnSpent = fraction(m0, 300 * RESOURCEPRICEMIN - fraction(100 * w0 - 50 * m0, RESOURCEPRICEMIN, FACTORYMAXWAREHOUSE), MULT10)
+    + fraction(m1, 2 * RESOURCEPRICEMIN, MULT8)
+
+  let max101 = maxPrice + maxPrice / 100 # 1% tolerance allowed
+  if (usdnSpent * MULT8 > max101 * m) then throw("Actual price = " + usdnSpent.toString() + " / " + m.toString()
+    + " > maxPrice = " + maxPrice.toString() + ", (" + locId + ", " + matTypes[matType] + ")") else
+
+  (IntegerEntry(whKey, w0 - m), usdnSpent, m) # warehouse action, usdnSpent, materialAmount bought
+}
+
+func getBackpack(bpKey: String) = {
+  let p = stakingContract.getString(bpKey).valueOrElse("0:0_0_0_0_0_0:0_0_0_0_0_0:").split(":")
+  [
+    p[bpIdxLevel].parseInt().valueOrElse(0).toString(),
+    if (p[bpIdxRes].split("_").size() == NUMRES) then p[bpIdxRes] else "0_0_0_0_0_0",
+    if (p[bpIdxMat].split("_").size() == NUMRES) then p[bpIdxMat] else "0_0_0_0_0_0",
+    p[bpIdxProd]
+  ]
+}
+
+# sell a list of 6 resources to factory
+@Callable(i)
+func sellResources(amounts: List[Int], minPrices: List[Int]) = {
+#  if (i.caller != this) then throw("temporary disabled") else
+  let duckAssetId = stakingContract.getString(keyStakedDuckByOwner(i.caller.toString())).valueOrErrorMessage("You don't have a duck staked")
+  if (i.payments.size() != 0) then throw("sellResources doesn't require any payments") else
+  let curLocation = stakingContract.getString(keyDuckLocation(duckAssetId)).valueOrElse(DEFAULTLOCATION).split("_")
+  if (curLocation[locIdxType] != "F") then throw("Duck location type should be Factory, but is " + curLocation[locIdxType]) else
+  let locId = curLocation[locIdxId]
+  let currentPack = getBackpack(keyBackpackByDuck(duckAssetId))
+  let resList = currentPack[bpIdxRes].split("_")
+  
+  # updates warehouse and backpack if resType match
+  func adder(acc: (List[IntegerEntry], List[String], Int), j: Int) = {
+    if (amounts[j] > resList[j].parseIntValue()) then throw("You have " + resList[j] + " of " + resTypes[j] 
+      + ", but tried to sell " + amounts[j].toString()) else
+    if (amounts[j] < 0) then throw("You tried to sell negative amount of " + resTypes[j] + ": " + amounts[j].toString()) else
+    if (amounts[j] > 0) then {
+      let b = sellInternal(locId, j, amounts[j], minPrices[j.value()]) # warehouse action, usdnReceived; (resAmountSold always == amounts[j])
+      (
+        acc._1 :+ b._1, # warehouse new amount
+        acc._2 :+ (parseIntValue(resList[j]) - amounts[j]).toString(), # decrease backpack resource by amounts[j]
+        acc._3 + b._2 # USDN
+      )
+    } else
+      (acc._1, 
+      acc._2 :+ resList[j], # keep old res amount
+      acc._3)
+  }
+
+  let merged = FOLD<6>([0, 1, 2, 3, 4, 5], ([], [], 0), adder)
+  let newPack = makeString([currentPack[bpIdxLevel], makeString(merged._2, "_"), currentPack[bpIdxMat], currentPack[bpIdxProd]], ":")
+  let result = stakingContract.invoke("updateBackpack", [duckAssetId, newPack], []).asString()
+
+  (merged._1 :+ ScriptTransfer(i.caller, merged._3, usdnAssetId), result)
+}
+
+@Callable(i)
+func buyMaterials(amounts: List[Int], maxPrices: List[Int]) = {
+#  if (i.caller != this) then throw("temporary disabled") else
+  let duckAssetId = stakingContract.getString(keyStakedDuckByOwner(i.caller.toString())).valueOrErrorMessage("You don't have a duck staked")
+  if (i.payments.size() != 1) then throw("exactly 1 payment must be attached") else
+  let pmt = i.payments[0]
+  let amt = pmt.amount
+  let pmtAssetId = pmt.assetId.valueOrErrorMessage("WAVES can't be used as payment")
+  if (pmtAssetId != usdnAssetId) then throw("USDN payments only!") else
+  let curLocation = stakingContract.getString(keyDuckLocation(duckAssetId)).valueOrElse(DEFAULTLOCATION).split("_")
+  if (curLocation[locIdxType] != "F") then throw("Duck location type should be Factory, but is " + curLocation[locIdxType]) else
+  let locId = curLocation[locIdxId]
+  let currentPack = getBackpack(keyBackpackByDuck(duckAssetId))
+  let matList = currentPack[bpIdxMat].split("_")
+  
+  # updates warehouse and backpack if resType match
+  func mUpdater(acc: (List[IntegerEntry], List[String], Int), j: Int) = {
+    if (amounts[j] < 0) then throw("You tried to buy negative amount of " + matTypes[j] + ": " + amounts[j].toString()) else
+    if (amounts[j] > 0) then {
+      let b = buyInternal(locId, j, amounts[j], maxPrices[j]) # warehouse action, usdnSpent, materialAmount bought
+      (
+        acc._1 :+ b._1, # warehouse set new amount action
+        acc._2 :+ (parseIntValue(matList[j]) + b._3).toString(), # increase backpack material
+        acc._3 + b._2 # USDN
+      )
+    } else
+      (acc._1, 
+      acc._2 :+ matList[j], # keep old material amount
+      acc._3)
+  }
+
+  let merged = FOLD<6>([0, 1, 2, 3, 4, 5], ([], [], 0), mUpdater)
+  if (merged._3 > amt) then throw("Insufficient payment! Attached=" + amt.toString() + ", required=" + toString(merged._3)) else
+  let newPack = makeString([currentPack[bpIdxLevel], currentPack[bpIdxRes], makeString(merged._2, "_"), currentPack[bpIdxProd]], ":")
+  let result = stakingContract.invoke("updateBackpack", [duckAssetId, newPack], []).asString()
+  let rest = if (amt - merged._3 > 0) then [ScriptTransfer(i.caller, amt - merged._3, usdnAssetId)] else []
+
+  (merged._1 ++ rest, result)
+}
