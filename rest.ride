@@ -1,0 +1,352 @@
+{-# STDLIB_VERSION 6 #-}
+{-# CONTENT_TYPE DAPP #-}
+{-# SCRIPT_TYPE ACCOUNT #-}
+
+let chain = this.bytes.drop(1).take(1)
+let usdnAssetId = match(chain) {
+  case base16'57' => base58'DG2xFkPdDwKUoBkzGAhQtLpSGzfXLiCYPEzeKH2Ad24p'
+  case base16'54' => base58'HezsdQuRDtzksAYUy97gfhKy7Z1NW2uXYSHA3bgqenNZ'
+  case _ => throw("Unknown chain")
+}
+# let economyContract = addressFromStringValue(match(chain) {
+#   case base16'57' => "3P2sk1KncSxRaZs8b4CWGPw2jkvvav74u4D"
+#   case base16'54' => "3N8y4wxX3JC4TdrCJBXX16SjWf6X256hrep"
+#   case _ => throw("Unknown chain")
+# })
+# let stakingContract = addressFromStringValue(match(chain) {
+#   case base16'57' => "3PLncXtS1U83D6cQbFD3H8rBHPLgzxSFKZ1"
+#   case base16'54' => "3NDCyBG5q85JuaRiigUeEtainyjCQT3XpZm"
+#   case _ => throw("Unknown chain")
+# })
+let InfraUpgradeCostS = match(chain) {
+  case base16'57' => 63_0719_8406 # 63.07198406 * L materials need to upgrade S land from (L-1) to L level
+  case base16'54' => 6307_1984 # 0.63071984 materials for testnet
+  case _ => throw("Unknown chain")
+}
+let LANDPREFIX = "LAND"
+let DUCKPREFIX = "DUCK"
+let SEP = "__"
+let ARTPRESALE = "PRESALE"
+let DAILYRESBYPIECE = 345_6000 # 0.03456000 (base value, not upgraded)
+let DAYMILLIS = 86_400_000 # 24*60*60*1000
+let NUMRES = 6
+let SSIZE = 25
+let MSIZE = 100
+let LSIZE = 225
+let XLSIZE = 400
+let XXLSIZE = 625
+let recLandNum = 0
+let recLandSize = 1
+let recTerrains = 2
+let recContinent = 3
+
+# warehouse groups:
+let whIdxVol = 0 # warehouse volume (3 * (infaLevel + 1) * landIndex)
+let whIdxRes = 1 # resList
+let whIdxMat = 2 # matList
+let whIdxProd = 3 # prodList
+
+func keyRestCfg() = "%s__restConfig"
+
+# data indices from restConfig
+let IdxCfgStakingDapp    = 1
+let IdxCfgEconomyDapp    = 2
+let IdxCfgGovernanceDapp = 3
+
+func getStringOrFail(address: Address, key: String) = address.getString(key)
+    .valueOrErrorMessage(makeString(["mandatory ", address.toString(), ".", key, " is not defined"], ""))
+func readRestCfgOrFail() = split_4C(this.getStringOrFail(keyRestCfg()), SEP)
+func getContractAddressOrFail(restCfg: List[String], idx: Int) = restCfg[idx].addressFromString()
+  .valueOrErrorMessage("Rest cfg doesn't contain address at index " + idx.toString())
+let restCfg = readRestCfgOrFail()
+let stakingContract = restCfg.getContractAddressOrFail(IdxCfgStakingDapp)
+let economyContract = restCfg.getContractAddressOrFail(IdxCfgEconomyDapp)
+let governanceContract = restCfg.getContractAddressOrFail(IdxCfgEconomyDapp)
+
+# staking contract keys:
+func keyDuckIdToOwner(assetId: String) = "duckOwner_" + assetId
+func keyStakedTimeByAssetId(assetId: String) = "stakedTime_" + assetId # for both ducks and lands
+func keyStakedDuckByOwner(ownerAddr: String) = "stakedDuckByOwner_" + ownerAddr
+func keyStakedTimeByTypeAssetIdAndOwner(nftType: String, assetId: String, ownerAddr: String) =
+    "stakedTimeByTypeAssetIdAndOwner_" + nftType + "_" + assetId + "_" + ownerAddr # DUCKPREFIX | LANDPREFIX
+func keyBackpackByDuck(duckAssetId: String) = "backPack_" + duckAssetId
+func keyWarehouseByLand(landAssetId: String) = "wareHouse_" + landAssetId
+func keyDuckLocation(duckAssetId: String) = "duckLocation_" + duckAssetId
+func keyDuckHealth(duckAssetId: String) = "duckHealth_" + duckAssetId
+func keyLandAssetIdToOwner(assetId: String) = "nftOwner_" + assetId
+func keyInfraLevelByAssetId(assetId: String) = "infraLevel_" + assetId
+func keyLandArtStatusByTypeAndAssetId(type: String, assetId: String) = makeString(["landArtStatus", type, assetId], "_")
+func keyPresaleArtActivatedByAssetId(assetId: String) = "presaleArtActivated_" + assetId
+func keyStakedLandsByOwner(ownerAddr: String) = "stakedLandsByOwner_" + ownerAddr
+
+func asString(v: Any) = {
+  match v {
+    case s: String => s
+    case _ => throw("fail to cast into String")
+  }
+}
+
+func asListIntCompacted(val: Any) = {
+  match val {
+    case valAnyList: List[Any] => {
+      if (valAnyList.size() != NUMRES) then throw("Array size is " + valAnyList.size().toString()) else
+      func conv(acc: List[String], item: Any) = {
+        match item {
+          case it: Int => acc :+ it.toString()
+          case _ => throw("List type is not Int")
+        }
+      }
+      let r = FOLD<6>(valAnyList, [], conv)
+      makeString(r, "_")
+    }
+    case _ => throw("fail to cast into List")
+  }
+}
+
+func asSplitResult(val: Any) = {
+  match val {
+    case t2: (List[Any], List[Any]) => (asListIntCompacted(t2._1), asListIntCompacted(t2._2))
+    case _ => throw("fail to cast into (List, List)")
+  }
+}
+
+func walletInternal(userAddressOpt: String) = {
+  let addr = addressFromString(userAddressOpt)
+  let balance = if (addr.isDefined()) then addr.value().wavesBalance() else BalanceDetails(0, 0, 0, 0)
+  let usdnBalance = if (addr.isDefined()) then assetBalance(addr.value(), usdnAssetId) else 0
+  makeString(["%s%d%d", "wallet", balance.available.toString(), usdnBalance.toString()], SEP)
+}
+
+func applyBonuses(landAssetId: String, pieces: Int) = {
+  let infraLevel = stakingContract.getInteger(keyInfraLevelByAssetId(landAssetId)).valueOrElse(0)
+  # base * (1 + 0.25*Level + 0.15*(isActive ? artPieces/pieces : 0))
+  let artPieces = stakingContract.getInteger(keyLandArtStatusByTypeAndAssetId(ARTPRESALE, landAssetId))
+    .valueOrElse(if (stakingContract.getBoolean(keyPresaleArtActivatedByAssetId(landAssetId)).valueOrElse(false)) then pieces else 0)
+  (infraLevel, artPieces, DAILYRESBYPIECE + fraction(DAILYRESBYPIECE, infraLevel, 4) + fraction(DAILYRESBYPIECE, artPieces * 3, pieces * 20))
+}
+
+func numPiecesBySize(landSize: String) = {
+  match (landSize) {
+    case "S" => SSIZE
+    case "M" => MSIZE
+    case "L" => LSIZE
+    case "XL" => XLSIZE
+    case "XXL" => XXLSIZE
+    case _ => throw("Unknown land size")
+  }
+}
+
+# it is recommended to invoke stakingContract.getWarehouseREADONLY() instead, but we have 100 invokes limit
+func getWarehouse(whKey: String, landIndex: Int, infraLevel: Int) = {
+  let volPrefix = landIndex.toString() + "_" + infraLevel.toString()
+  let p = stakingContract.getString(whKey).valueOrElse(volPrefix + ":0_0_0_0_0_0:0_0_0_0_0_0:").split(":")
+  [
+    p[whIdxVol],
+    if (p[whIdxRes].split("_").size() == NUMRES) then p[whIdxRes] else "0_0_0_0_0_0",
+    if (p[whIdxMat].split("_").size() == NUMRES) then p[whIdxMat] else "0_0_0_0_0_0",
+    # "" if no products;     product0:                     product1:
+    p[whIdxProd] # numItems1,numItems2,numItems3_numItems1,numItems2,numItems3...
+  ]
+}
+
+func duckInfoTuple(duckAssetId: String) = {
+  (stakingContract.getInteger(keyStakedTimeByAssetId(duckAssetId)).valueOrElse(-1), # stakedTime
+    assetInfo(duckAssetId.fromBase58String()).value().name, # name
+    stakingContract.getString(keyDuckLocation(duckAssetId)).valueOrElse(""), # location
+    stakingContract.getInteger(keyDuckHealth(duckAssetId)).valueOrElse(-1), # health
+    stakingContract.invoke("getBackpackREADONLY", [duckAssetId], []).asString() # backpack
+  )
+}
+
+func duckInfoArray(duckAssetId: String, owner: String, duckInf: (Int, String, String, Int, String)) = {
+  [
+    "%s%s__assetId__" + duckAssetId,
+    "%s%s__owner__" + owner,
+    "%s%d__stakedTime__" + duckInf._1.toString(),
+    "%s%s__name__" + duckInf._2,
+    "%s%s__location__" + duckInf._3,
+    "%s%d__health__" + duckInf._4.toString(),
+    "%s%s__backPack__" + duckInf._5
+  ]
+}
+
+func landInfoArray(landAssetId: String, owner: String, stakedTime: Int) = {
+  if (landAssetId == "") then throw("landAssetId is required") else
+  let a = assetInfo(landAssetId.fromBase58String()).value()
+  let d = a.description.split("_")
+  let landNum = if (a.quantity > 0) then d[recLandNum] else "-" + d[recLandNum] # prefix "-" for burned lands
+  let pieces = numPiecesBySize(d[recLandSize])
+  let productivity = applyBonuses(landAssetId, pieces) # (infraLevel, artPieces, dailyProductionByPiece)
+  let deltaTime = lastBlock.timestamp - stakedTime
+  let availRes = if (stakedTime > 0) then fraction(deltaTime, productivity._3 * pieces, DAYMILLIS) else 0
+  let needMat = fraction(InfraUpgradeCostS, pieces * (productivity._1 + 1), SSIZE)
+  let globalAndLocal = if (stakedTime > 0) then 
+    stakingContract.invoke("splitByGlobalAndLocalWeightsREADONLY", [needMat, availRes, d[recTerrains]], []).asSplitResult()
+  else
+    (stakingContract.invoke("splitByGlobalWeightsREADONLY", [needMat], []).asListIntCompacted(), "")
+  [
+    "%s%s__assetId__" + landAssetId,
+    "%s%s__owner__" + owner,
+    "%s%d__stakedTime__" + stakedTime.toString(),
+    "%s%s__description__" + makeString([landNum, d[recLandSize], d[recTerrains], d[recContinent]], "_"),
+    "%s%d__infraLevel__" + productivity._1.toString(),
+    "%s%s__availResByType__" + globalAndLocal._2,
+    "%s%d__availResTotal__" + availRes.toString(),
+    "%s%s__needMaterial__" + globalAndLocal._1,
+    makeString(["%s%s", "landArtefacts", 
+      "PRESALE:" + productivity._2.toString()
+    ], SEP),
+    "%s%s__warehouse__" + getWarehouse(keyWarehouseByLand(landAssetId), pieces / SSIZE, productivity._1).makeString(":")
+  ]
+}
+
+@Callable(i)
+func constructorV1(stakingContract: String, economyContract: String, governanceContract: String) = {
+   if (i.caller != this) then throw("permissions denied") else
+
+   [StringEntry(keyRestCfg(), makeString(["%s%s%s", stakingContract, economyContract, governanceContract], SEP))]
+}
+
+@Callable(i)
+func walletInfoREADONLY(userAddressOpt: String) = {
+  ([], walletInternal(userAddressOpt))
+}
+
+@Callable(i)
+func duckInfoREADONLY(duckAssetId: String, userAddressOpt: String) = {
+  let addr = addressFromString(userAddressOpt)
+  let duckAsset = duckAssetId.fromBase58String()
+  if (duckAssetId == "") then throw("duckAssetId is required") else
+  let duckOwner = stakingContract.getString(keyDuckIdToOwner(duckAssetId))
+  let owner = if (duckOwner.isDefined()) then duckOwner.value()
+    else if (addr.isDefined() && assetBalance(addr.value(), duckAsset) == 1) then userAddressOpt
+    else ""
+  ([], (duckInfoArray(duckAssetId, owner, duckInfoTuple(duckAssetId)),
+    walletInternal(userAddressOpt))
+  )
+}
+
+@Callable(i)
+func landInfoREADONLY(landAssetId: String, userAddressOpt: String) = {
+  let addr = addressFromString(userAddressOpt)
+  let landAsset = landAssetId.fromBase58String()
+  if (landAssetId == "") then throw("landAssetId is required") else
+  let stakedTime = stakingContract.getInteger(keyStakedTimeByAssetId(landAssetId)).valueOrElse(0)
+  let owner = if (stakedTime > 0) then stakingContract.getString(keyLandAssetIdToOwner(landAssetId)).value()
+    else if (addr.isDefined() && assetBalance(addr.value(), landAsset) == 1) then userAddressOpt
+    else ""
+  
+  let stakedDuck = stakingContract.getString(keyStakedDuckByOwner(userAddressOpt))
+  let duckInf = if (addr.isDefined() && stakedDuck.isDefined()) then {
+    let duckAssetId = stakedDuck.value()
+    (duckAssetId, duckInfoTuple(duckAssetId)) # (stakedTime, name, location, health, backpack)
+  } else ("", (-1, "", "", -1, ""))
+
+  ([], (
+    landInfoArray(landAssetId, owner, stakedTime), 
+    duckInfoArray(duckInf._1, userAddressOpt, duckInf._2), 
+    walletInternal(userAddressOpt)))
+}
+
+@Callable(i)
+func stakedLandsInfoREADONLY(myAddress: String, landOwnerAddress: String) = {
+  if (landOwnerAddress == "") then throw("landOwnerAddress is required") else
+  let myAddr = addressFromString(myAddress)
+  let landsStr = stakingContract.getString(keyStakedLandsByOwner(landOwnerAddress))
+  let lands = if (landsStr.isDefined()) then split_51C(landsStr.value(), "_") else []
+
+  func oneLand(acc: List[List[String]], landAssetId: String) = {
+    let landAsset = landAssetId.fromBase58String()
+    if (landAssetId == "") then throw("landAssetId is required") else
+    let stakedTime = stakingContract.getInteger(keyStakedTimeByAssetId(landAssetId)).valueOrElse(0)
+    let descr = assetInfo(landAsset).value().description
+    let d = descr.split("_")
+    let pieces = numPiecesBySize(d[recLandSize])
+    let productivity = applyBonuses(landAssetId, pieces) # (infraLevel, artPieces, dailyProductionByPiece)
+
+    let deltaTime = lastBlock.timestamp - stakedTime
+    let availRes = fraction(deltaTime, productivity._3 * pieces, DAYMILLIS)
+    acc :+ [
+      "%s%s__landAssetId__" + landAssetId,
+      "%s%d__stakedTime__" + stakedTime.toString(),
+      "%s%s__description__" + descr,
+      "%s%d__infraLevel__" + productivity._1.toString(),
+      makeString(["%s%s", "landArtefacts", 
+        "PRESALE:" + productivity._2.toString()
+      ], SEP),
+      "%s%s__availRes__" + availRes.toString()
+    ]
+  }
+  let r = FOLD<100>(lands, [], oneLand)
+
+  let stakedDuck = stakingContract.getString(keyStakedDuckByOwner(myAddress))
+  let duckInf = if (myAddr.isDefined() && stakedDuck.isDefined()) then {
+    let duckAssetId = stakedDuck.value()
+    (duckAssetId, duckInfoTuple(duckAssetId)) # (stakedTime, name, location, health, backpack)
+  } else ("", (-1, "", "", -1, ""))
+
+  ([], (
+    r, 
+    duckInfoArray(duckInf._1, myAddress, duckInf._2), 
+    walletInternal(myAddress)))
+}
+
+# The code below was requested by frontend team, because they are unable to parse complicated json
+@Callable(i)
+func duckByOwnerInfoREADONLY(userAddress: String) = {
+  let stakedDuck = stakingContract.getString(keyStakedDuckByOwner(userAddress))
+  ([], if (addressFromString(userAddress).isDefined() && stakedDuck.isDefined()) then {
+    let duckAssetId = stakedDuck.value()
+    duckInfoArray(duckAssetId, userAddress, duckInfoTuple(duckAssetId))
+    } else duckInfoArray("", userAddress, (-1, "", "", -1, ""))
+  )
+}
+
+# The code below was requested by frontend team, because they are unable to parse complicated json
+@Callable(i)
+func duckByAssetIdInfoREADONLY(duckAssetId: String) = {
+  let owner = stakingContract.getString(keyDuckIdToOwner(duckAssetId))
+  let duckInf = duckInfoTuple(duckAssetId)
+  ([], duckInfoArray(duckAssetId, if (owner.isDefined()) then owner.value() else "", duckInfoTuple(duckAssetId)))
+}
+
+# The code below was requested by frontend team, because they are unable to parse complicated json
+@Callable(i)
+func landByAssetIdInfoREADONLY(landAssetId: String) = {
+  if (landAssetId == "") then throw("landAssetId is required") else
+  let stakedTime = stakingContract.getInteger(keyStakedTimeByAssetId(landAssetId)).valueOrElse(-1)
+  let owner = if (stakedTime > 0) then stakingContract.getString(keyLandAssetIdToOwner(landAssetId)).value() else ""
+  ([], landInfoArray(landAssetId, owner, stakedTime))
+}
+
+# The code below was requested by frontend team, because they are unable to parse complicated json
+@Callable(i)
+func stakedLandsByOwnerInfoREADONLY(landOwnerAddress: String) = {
+  if (landOwnerAddress == "") then throw("landOwnerAddress is required") else
+  let landsStr = stakingContract.getString(keyStakedLandsByOwner(landOwnerAddress))
+  let lands = if (landsStr.isDefined()) then split_51C(landsStr.value(), "_") else []
+
+  func oneLand(acc: List[List[String]], landAssetId: String) = {
+    if (landAssetId == "") then throw("landAssetId is required") else
+    let stakedTime = stakingContract.getInteger(keyStakedTimeByAssetId(landAssetId)).valueOrElse(-1)
+    acc :+ landInfoArray(landAssetId, landOwnerAddress, stakedTime)
+  }
+  let r = FOLD<100>(lands, [], oneLand)
+
+  ([], r)
+}
+
+# up to 100
+@Callable(i)
+func landsByIdsInfoREADONLY(landAssetIds: List[String]) = {
+
+  func oneLand(acc: List[List[String]], landAssetId: String) = {
+    if (landAssetId == "") then throw("landAssetId is required") else
+    let stakedTime = stakingContract.getInteger(keyStakedTimeByAssetId(landAssetId)).valueOrElse(-1)
+    let owner = if (stakedTime > 0) then stakingContract.getString(keyLandAssetIdToOwner(landAssetId)).value() else ""
+    acc :+ landInfoArray(landAssetId, owner, stakedTime)
+  }
+  let r = FOLD<100>(landAssetIds, [], oneLand)
+
+  ([], r)
+}

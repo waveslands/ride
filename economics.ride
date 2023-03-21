@@ -4,34 +4,78 @@
 
 # https://www.mathcha.io/editor/Dq3mYFy7UqlHl4FqkZMkWh2BQZDvtyEZPMgTxVj0rp
 
+let SEP = "__"
 let MULT6 = 1_000_000
 let MULT8 = 1_0000_0000
 let MULT10 = 100_0000_0000
-let chain = this.bytes.drop(1).take(1).toUtf8String()
+let chain = this.bytes.drop(1).take(1)
 let usdnAssetId = match(chain) {
-    case "W" => base58'DG2xFkPdDwKUoBkzGAhQtLpSGzfXLiCYPEzeKH2Ad24p'
-    case "T" => base58'HezsdQuRDtzksAYUy97gfhKy7Z1NW2uXYSHA3bgqenNZ'
-    case _ => throw("Unknown chain")
-  }
-let stakingContract = addressFromStringValue(match(chain) {
-    case "W" => "3PLncXtS1U83D6cQbFD3H8rBHPLgzxSFKZ1"
-    case "T" => "3NDCyBG5q85JuaRiigUeEtainyjCQT3XpZm"
-    case _ => throw("Unknown chain")
-  })
+  case base16'57' => base58'DG2xFkPdDwKUoBkzGAhQtLpSGzfXLiCYPEzeKH2Ad24p'
+  case base16'54' => base58'HezsdQuRDtzksAYUy97gfhKy7Z1NW2uXYSHA3bgqenNZ'
+  case _ => throw("Unknown chain")
+}
+let defaultRestAddressStr = match(chain) {
+  case base16'57' => "3PQCuvFbvh4LkPUnrnU1z3jnbA1p9m3WNhv"
+  case base16'54' => "3MumkGGztCKAXpWDqxkddofqXSUbqQkvSJy"
+  case _ => throw("Unknown chain")
+}
+
+func getStringOrFail(address: Address, key: String) = address.getString(key)
+    .valueOrErrorMessage(makeString(["mandatory ", address.toString(), ".", key, " is not defined"], ""))
+func getIntOrElse(key: String, defaultVal: Int) = this.getInteger(key).valueOrElse(defaultVal)
+
+# data indices from restConfig
+let IdxCfgStakingDapp    = 1
+let IdxCfgEconomyDapp    = 2
+let IdxCfgGovernanceDapp = 3
+
+func keyRestCfg() = "%s__restConfig"
+func keyRestAddress() = "%s__restAddr"
+
+func readRestCfgOrFail(rest: Address) = split_4C(rest.getStringOrFail(keyRestCfg()), SEP)
+func getContractAddressOrFail(restCfg: List[String], idx: Int) = restCfg[idx].addressFromString()
+  .valueOrErrorMessage("Rest cfg doesn't contain address at index " + idx.toString())
+
+# GLOBAL VARIABLES
+let restContract = this.getString(keyRestAddress()).valueOrElse(defaultRestAddressStr).addressFromStringValue()
+let restCfg = restContract.readRestCfgOrFail()
+let stakingContract = restCfg.getContractAddressOrFail(IdxCfgStakingDapp)
+
 let DEFAULTLOCATION = "Africa_F_Africa"
 let NUMRES = 6
 let FACTORYMAXWAREHOUSE = 100_0000_0000 # 100 material for each type
 let RESOURCEPRICEMIN = 158549 # 0.158549 // 0.03456000 * 25 * 0.158549 = 0.136986336 USDN (20% APR)
 let MINPAYMENT = 10000 # 1 cent
+let SELLMULTIPLIER = 200
+let BUYMULTIPLIER = 300
 
 let resTypes = ["Oil", "Ore", "Wood", "Sand", "Clay", "Organic"]
 let matTypes = ["Fuel", "Metal", "Plank", "Glass", "Plastic", "Protein"]
 let continents = ["Americas", "Europe", "Asia", "Africa", "Oceania"]
+let productionMatrix = [ # up to 250 recipes (50 per continent); fuel, metal, plank, glass, plastic, protein - 1 decimal, weight=1 decimal, package int
+  # Americas
+  "1_1_1_2_2_5_1_10", # 0 Аптечка * level, Восстанавливает hp (30,60,120)
+  # Europe
+  "2_5_5_2_7_5_2_100", # 1 Рюкзак, Увеличивает кол-во переносимого груза (5,10,20)
+  # Asia
+  "1_1_1_2_2_5_1_10", # 2 Рацион, Увеличивает показатели (+2,4,8) ко всем параметрам персонажа на 24h
+  # Africa
+  "9_9_1_5_5_1_5_100", # 3 Ракетный ранец, Уменьшает шанс столкновения с воздушными препятствиями
+  # Oceania
+  "1_5_1_5_5_1_1_100" # 4 Радар, Позволяет видеть сквозь облака, увеличивает шанс попадания
+]
+let contIdxAmericas = 0
+let contIdxEurope = 1
+let contIdxAsia = 2
+let contIdxAfrica = 3
+let contIdxOceania = 4
+
 func keyFactoryWarehouseByIdAndType(factoryId: String, resType: Int) = "factoryWhByContinentAndRes_" + factoryId + "_" + resType.toString()
 # staking contract keys:
 func keyStakedDuckByOwner(ownerAddr: String) = "stakedDuckByOwner_" + ownerAddr
 func keyBackpackByDuck(duckAssetId: String) = "backPack_" + duckAssetId
 func keyDuckLocation(duckAssetId: String) = "duckLocation_" + duckAssetId
+func keyBlocked() = "contractsBlocked"
 
 let locIdxContinent = 0
 let locIdxType = 1
@@ -50,26 +94,6 @@ func asString(v: Any) = {
   }
 }
 
-# decrease one element resList[resType] by amount, keep other elements
-func subRes(resList: List[String], resType: Int, amount: Int) = {
-
-  func subber(acc: List[String], i: Int) = {
-    acc :+ if (i == resType) then (resList[i].parseIntValue() - amount).toString() else resList[i]
-  }
-  let r = FOLD<6>([0, 1, 2, 3, 4, 5], [], subber)
-  r.makeString("_")
-}
-
-# increase one element matList[matType] by amount, keep other elements
-func addMat(matList: List[String], matType: Int, amount: Int) = {
-
-  func increaser(acc: List[String], i: Int) = {
-    acc :+ if (i == matType) then (matList[i].parseIntValue() + amount).toString() else matList[i]
-  }
-  let m = FOLD<6>([0, 1, 2, 3, 4, 5], [], increaser)
-  m.makeString("_")
-}
-
 # sell single resource to factory
 # Пусть r - количество ресурсов, продаваемых заводу
 # w0 - текущее к-во материалов на складе, W = FACTORYMAXWAREHOUSE - макс. объем склада
@@ -84,7 +108,7 @@ func sellInternal(locId: String, resType: Int, amount: Int, minPrice: Int) = {
   let whKey = keyFactoryWarehouseByIdAndType(locId, resType)
   let w0 = getInteger(whKey).valueOrElse(0)
   let r0 = if (w0 > FACTORYMAXWAREHOUSE) then 0 else if (w0 + amount > FACTORYMAXWAREHOUSE) then FACTORYMAXWAREHOUSE - w0 else amount
-  let usdnReceived = fraction(r0, 2 * RESOURCEPRICEMIN - fraction(w0 + r0 / 2, RESOURCEPRICEMIN, FACTORYMAXWAREHOUSE), MULT8)
+  let usdnReceived = fraction(r0, SELLMULTIPLIER * RESOURCEPRICEMIN - fraction(100 * w0 + 50 * r0, RESOURCEPRICEMIN, FACTORYMAXWAREHOUSE), MULT10)
     + fraction(amount - r0, RESOURCEPRICEMIN, MULT8)
 
   let min99 = minPrice - minPrice / 100 # 1% tolerance allowed
@@ -109,7 +133,7 @@ func buyInternal(locId: String, matType: Int, amount: Int, maxPrice: Int) = {
   let m1 = if (w0 > FACTORYMAXWAREHOUSE) then min([amount, w0 - FACTORYMAXWAREHOUSE]) else 0
   let m0 = min([w0, amount - m1])
   let m = m0 + m1
-  let usdnSpent = fraction(m0, 300 * RESOURCEPRICEMIN - fraction(100 * w0 - 50 * m0, RESOURCEPRICEMIN, FACTORYMAXWAREHOUSE), MULT10)
+  let usdnSpent = fraction(m0, BUYMULTIPLIER * RESOURCEPRICEMIN - fraction(100 * w0 - 50 * m0, RESOURCEPRICEMIN, FACTORYMAXWAREHOUSE), MULT10)
     + fraction(m1, 2 * RESOURCEPRICEMIN, MULT8)
 
   let max101 = maxPrice + maxPrice / 100 # 1% tolerance allowed
@@ -125,14 +149,25 @@ func getBackpack(bpKey: String) = {
     p[bpIdxLevel].parseInt().valueOrElse(0).toString(),
     if (p[bpIdxRes].split("_").size() == NUMRES) then p[bpIdxRes] else "0_0_0_0_0_0",
     if (p[bpIdxMat].split("_").size() == NUMRES) then p[bpIdxMat] else "0_0_0_0_0_0",
-    p[bpIdxProd]
+    # "" if no products;     product0:                     product1:
+    p[bpIdxProd] # numItems1,numItems2,numItems3_numItems1,numItems2,numItems3...
   ]
+}
+
+func checkBlocked() = {
+  if (stakingContract.getBoolean(keyBlocked()).valueOrElse(false)) then throw("Contracts are under maintenance") else unit
+}
+
+@Callable(i)
+func constructorV1(restAddr: String) = {
+  if (i.caller != this) then throw("Permission denied") else
+  [StringEntry(keyRestAddress(), restAddr)]
 }
 
 # sell a list of 6 resources to factory
 @Callable(i)
 func sellResources(amounts: List[Int], minPrices: List[Int]) = {
-#  if (i.caller != this) then throw("temporary disabled") else
+  strict blocked = checkBlocked()
   let duckAssetId = stakingContract.getString(keyStakedDuckByOwner(i.caller.toString())).valueOrErrorMessage("You don't have a duck staked")
   if (i.payments.size() != 0) then throw("sellResources doesn't require any payments") else
   let curLocation = stakingContract.getString(keyDuckLocation(duckAssetId)).valueOrElse(DEFAULTLOCATION).split("_")
@@ -147,7 +182,7 @@ func sellResources(amounts: List[Int], minPrices: List[Int]) = {
       + ", but tried to sell " + amounts[j].toString()) else
     if (amounts[j] < 0) then throw("You tried to sell negative amount of " + resTypes[j] + ": " + amounts[j].toString()) else
     if (amounts[j] > 0) then {
-      let b = sellInternal(locId, j, amounts[j], minPrices[j.value()]) # warehouse action, usdnReceived; (resAmountSold always == amounts[j])
+      let b = sellInternal(locId, j, amounts[j], minPrices[j]) # warehouse action, usdnReceived; (resAmountSold always == amounts[j])
       (
         acc._1 :+ b._1, # warehouse new amount
         acc._2 :+ (parseIntValue(resList[j]) - amounts[j]).toString(), # decrease backpack resource by amounts[j]
@@ -168,7 +203,7 @@ func sellResources(amounts: List[Int], minPrices: List[Int]) = {
 
 @Callable(i)
 func buyMaterials(amounts: List[Int], maxPrices: List[Int]) = {
-#  if (i.caller != this) then throw("temporary disabled") else
+  strict blocked = checkBlocked()
   let duckAssetId = stakingContract.getString(keyStakedDuckByOwner(i.caller.toString())).valueOrErrorMessage("You don't have a duck staked")
   if (i.payments.size() != 1) then throw("exactly 1 payment must be attached") else
   let pmt = i.payments[0]
@@ -204,4 +239,135 @@ func buyMaterials(amounts: List[Int], maxPrices: List[Int]) = {
   let rest = if (amt - merged._3 > 0) then [ScriptTransfer(i.caller, amt - merged._3, usdnAssetId)] else []
 
   (merged._1 ++ rest, result)
+}
+
+# instant exchange a list of 6 resources + money for materials according to current warehouse fill on factory
+@Callable(i)
+func exchangeResources(amounts: List[Int]) = {
+  strict blocked = checkBlocked()
+  let duckAssetId = stakingContract.getString(keyStakedDuckByOwner(i.caller.toString())).valueOrErrorMessage("You don't have a duck staked")
+  if (i.payments.size() != 1) then throw("exactly 1 payment must be attached") else
+  let pmt = i.payments[0]
+  let amt = pmt.amount
+  let pmtAssetId = pmt.assetId.valueOrErrorMessage("WAVES can't be used as payment")
+  if (pmtAssetId != usdnAssetId) then throw("USDN payments only!") else
+  let curLocation = stakingContract.getString(keyDuckLocation(duckAssetId)).valueOrElse(DEFAULTLOCATION).split("_")
+  if (curLocation[locIdxType] != "F") then throw("Duck location type should be Factory, but is " + curLocation[locIdxType]) else
+  let locId = curLocation[locIdxId]
+  let currentPack = getBackpack(keyBackpackByDuck(duckAssetId))
+  let resList = currentPack[bpIdxRes].split("_")
+  let matList = currentPack[bpIdxMat].split("_")
+
+  # updates backpack if resType match
+  func exchanger(acc: (List[String], List[String], Int, List[IntegerEntry]), j: Int) = {
+    let whKey = keyFactoryWarehouseByIdAndType(locId, j)
+    let w0 = getInteger(whKey).valueOrElse(0)
+    
+    let amj = amounts[j]
+    if (amj > resList[j].parseIntValue()) then throw("You have " + resList[j] + " of " + resTypes[j] 
+      + ", but tried to exchange " + amj.toString()) else
+    if (amj < 0) then throw("You tried to exchange negative amount of " + resTypes[j] + ": " + amj.toString()) else
+    if (amj > 0) then
+      ( acc._1 :+ (parseIntValue(resList[j]) - amj).toString(), # decrease backpack resource by amounts[j]
+        acc._2 :+ (parseIntValue(matList[j]) + amj).toString(), # increase backpack material
+        acc._3 + fraction(amj, RESOURCEPRICEMIN, MULT8), # USDN
+        acc._4 :+ IntegerEntry(whKey, w0)
+      )
+    else
+      ( acc._1 :+ resList[j], # keep old res amount
+        acc._2 :+ matList[j], # keep old material amount
+        acc._3,
+        acc._4
+      )
+  }
+  let merged = FOLD<6>([0, 1, 2, 3, 4, 5], ([], [], 0, []), exchanger)
+  if (merged._3 > amt) then throw("Insufficient payment! Attached=" + amt.toString() + ", required=" + toString(merged._3)) else
+  let newPack = makeString([currentPack[bpIdxLevel], makeString(merged._1, "_"), makeString(merged._2, "_"), currentPack[bpIdxProd]], ":")
+  let result = stakingContract.invoke("updateBackpack", [duckAssetId, newPack], []).asString()
+  let rest = if (amt - merged._3 > 0) then [ScriptTransfer(i.caller, amt - merged._3, usdnAssetId)] else []
+
+  (rest ++ merged._4, result)
+}
+
+# productIdx: index within continent (not global)
+# quantity: amount of packages to buy
+@Callable(i)
+func buyGoods(productIdx: Int, level: Int, quantity: Int) = {
+  strict blocked = checkBlocked()
+  if (i.payments.size() != 0) then throw("buyGoods doesn't require any payments") else
+  if (quantity < 0) then throw("Quantity should be positive") else
+  let duckAssetId = stakingContract.getString(keyStakedDuckByOwner(i.caller.toString())).valueOrErrorMessage("You don't have a duck staked")
+  let curLocation = stakingContract.getString(keyDuckLocation(duckAssetId)).valueOrElse(DEFAULTLOCATION).split("_")
+  if (curLocation[locIdxType] != "M") then throw("Duck location type should be Manufactory, but is " + curLocation[locIdxType]) else
+  let cont = curLocation[locIdxContinent]
+  let currentPack = getBackpack(keyBackpackByDuck(duckAssetId))
+  let matList = currentPack[bpIdxMat].split("_")
+  if (productIdx < 0 || productIdx >= productionMatrix.size()) then throw("Unknown product idx=" + productIdx.toString()) else
+  let productContIdx = productIdx % continents.size()
+  if (continents[productContIdx] != cont) then throw("This product is available in " + continents[productContIdx] + ", but you are in " + cont) else
+  let recipe = productionMatrix[productIdx].split("_")
+  if (recipe.size() != NUMRES + 2) then throw("Fatal: unknown recipe: " + productionMatrix[productIdx]) else
+  let prodList = if (currentPack[bpIdxProd] == "") then [] else currentPack[bpIdxProd].split("_") # numItems1,numItems2,numItems3
+  # Iterate backpack products, pad backpack with zeroes to match recipes size; add quantity of needed product
+  func filler(acc: (List[String], Int), ignoredItem: String) = {
+    let n = acc._2 # counter of product triples in backpack
+    let x = if (n < prodList.size()) then prodList[n].split(",") else ["0", "0", "0"]
+    let x1s = x[0]
+    let x1 = x1s.parseIntValue()
+    let x2s = x[1]
+    let x2 = x2s.parseIntValue()
+    let x3s = x[2]
+    let x3 = x3s.parseIntValue()
+    let amount = quantity * recipe[7].parseIntValue()
+    let y = if (n == productIdx) then match (level) { # product index found   
+      case 1 => toString(x1 + amount) + "," +          x2s          + "," +          x3s
+      case 2 =>          x1s          + "," + toString(x2 + amount) + "," +          x3s
+      case 3 =>          x1s          + "," +          x2s          + "," + toString(x3 + amount)
+      case _ => throw("Product level should be 1..3, not " + level.toString())
+    } else x1s + "," + x2s + "," + x3s
+    (acc._1 :+ y, n + 1)
+  }
+  let bpProd = (FOLD<50>(productionMatrix, ([], 0), filler))._1
+  # Iterate materials
+  func producer(acc: List[String], j: Int) = {
+    let needMat = recipe[j].parseIntValue() * quantity
+    let haveMat = matList[j].parseIntValue()
+    if (needMat > haveMat) then throw("You have " + matList[j] + " of " + matTypes[j] 
+      + ", but recipe requires " + needMat.toString() + " for quantity " + quantity.toString()) else
+    if (needMat > 0) then {
+        acc :+ toString(haveMat - needMat) # decrease backpack material by needMat
+    } else
+      acc :+ matList[j] # keep old mat amount
+  }
+  let merged = FOLD<6>([0, 1, 2, 3, 4, 5], [], producer)
+
+  let newPack = makeString([currentPack[bpIdxLevel], currentPack[bpIdxRes], makeString(merged, "_"), makeString(bpProd, "_")], ":")
+  let result = stakingContract.invoke("updateBackpack", [duckAssetId, newPack], []).asString()
+  ([], result)
+}
+
+@Callable(i)
+func acceptServicePayment(service: String) = {
+  strict blocked = checkBlocked()
+  if (i.payments.size() != 1) then throw("exactly 1 payment must be attached") else
+  let pmt = i.payments[0]
+  let amt = pmt.amount
+  let pmtAssetId = pmt.assetId.valueOrErrorMessage("WAVES can't be used as payment")
+  if (pmtAssetId != usdnAssetId) then throw("USDN payments only!") else
+  let need = match (service) {
+      case "LAND_RENAME" => 10_000_000
+      case _ => throw("Unknown service!")
+    }
+  if (amt != need) then throw(service + " costs " + need.toString() + " USDN") else
+  ([], amt)
+}
+
+# cargoList contains all resources, materials and goods in the form: 
+# ${+/-}${resAmount}@${price}_${+/-}${resAmount}@${price}_ ... :${+/-}${matAmount}@${price}_ ... :${+/-}${goodsAmount}@${price}_
+# zero amount means ignore position
+# '-' means sell from warehouse, '+' - buy to warehouse
+# payment attached should cover all buy positions
+@Callable(i)
+func warehouseOrder(cargoListStr: String, landAssetId: String) = {
+  []
 }
