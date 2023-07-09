@@ -1,26 +1,13 @@
 {-# STDLIB_VERSION 6 #-}
 {-# CONTENT_TYPE DAPP #-}
 {-# SCRIPT_TYPE ACCOUNT #-}
+{-# IMPORT common.ride,landlib.ride,rpglib.ride #-}
 
-let chain = this.bytes.drop(1).take(1)
-let defaultRestAddressStr = match(chain) {
-  case base16'57' => "3PQCuvFbvh4LkPUnrnU1z3jnbA1p9m3WNhv"
-  case base16'54' => "3MumkGGztCKAXpWDqxkddofqXSUbqQkvSJy"
-  case _ => throw("Unknown chain")
-}
-
-let SEP = "__"
 let LISTSEP = ":"
 let DEFAULTQUORUM = 500_000 # 0.5 * 10^6 = 50%
 let MAXTITLE = 250
 let MAXVOTINGTIME = 1_209_600_000 # 2*7*24*60*60*1000ms
-let MULT6 = 1_000_000
 let DEFAULTFIRSTPROPOSAL = 1
-let SSIZE = 25
-let MSIZE = 100
-let LSIZE = 225
-let XLSIZE = 400
-let XXLSIZE = 625
 
 # indices to access proposal data fields (static)
 let govIdxProposalTxId = 1
@@ -38,28 +25,6 @@ let govStatusIdxWinVotes   = 3
 let govStatusIdxTotalVotes = 4
 let govStatusIdxIsCanceled = 5
 
-func getStringOrFail(address: Address, key: String) = address.getString(key)
-    .valueOrErrorMessage(makeString(["mandatory ", address.toString(), ".", key, " is not defined"], ""))
-func getIntOrElse(key: String, defaultVal: Int) = this.getInteger(key).valueOrElse(defaultVal)
-
-# data indices from restConfig
-let IdxCfgStakingDapp    = 1
-let IdxCfgEconomyDapp    = 2
-let IdxCfgGovernanceDapp = 3
-
-func keyRestCfg() = "%s__restConfig"
-func keyRestAddress() = "%s__restAddr"
-
-func readRestCfgOrFail(rest: Address) = split_4C(rest.getStringOrFail(keyRestCfg()), SEP)
-func getContractAddressOrFail(restCfg: List[String], idx: Int) = restCfg[idx].addressFromString()
-  .valueOrErrorMessage("Rest cfg doesn't contain address at index " + idx.toString())
-
-# GLOBAL VARIABLES
-let restContract = this.getString(keyRestAddress()).valueOrElse(defaultRestAddressStr).addressFromStringValue()
-let restCfg = restContract.readRestCfgOrFail()
-let stakingContract = restCfg.getContractAddressOrFail(IdxCfgStakingDapp)
-let economyContract = restCfg.getContractAddressOrFail(IdxCfgEconomyDapp)
-
 func keyQuorumRequiredPercent() = "%s__quorumRequired"
 func keyLastProposalId() = "%s__proposalId"
 func keyFirstProposalId() = "%s__firstProposalId"
@@ -68,29 +33,10 @@ func keyProposalDataById(proposalId: Int) = "%s%d__proposalData__" + proposalId.
 func keyProposalVotesByIdAndOption(proposalId: Int, opt: Int) = makeString(["%s%d%d", "votesByOpt", proposalId.toString(), opt.toString()], SEP)
 func keyProposalVotesByIdAndUser(proposalId: Int, userAddr: String) = makeString(["%s%d%s", "votesByUser", proposalId.toString(), userAddr], SEP)
 func keyProposalChoiceByIdAndUser(proposalId: Int, userAddr: String) = makeString(["%s%d%s", "optionByUser", proposalId.toString(), userAddr], SEP)
-func keyUserGwlReleaseTime(userAddr: String) = "%s%s__userGwlReleaseTime__" + userAddr
 # stats
 func keyNumUniqueVotersByProposalId(proposalId: Int) = "%s%d__numVoters__" + proposalId.toString()
 func keyStatsAverUniqueVoters() = "%s%s%s__stats__avg__uniqueVoters" # 6 decimals
 func keyStatsAverGwlVoted() = "%s%s%s__stats__avg__gwlVoted" # 6 decimals
-
-# staking contract keys:
-func keyResProportions() = "resTypesProportions"
-func keyStakedLandsByOwner(ownerAddr: String) = "stakedLandsByOwner_" + ownerAddr
-
-func asAnyList(v: Any) = {
-  match v {
-    case l: List[Any] => l
-    case _ => throw("fail to cast into List[Any]")
-  }
-}
-
-func asInt(v: Any) = {
-  match v {
-    case i: Int => i
-    case _ => throw("fail to cast into Int")
-  }
-}
 
 func statusData(isVotingValid: Boolean, winOption: Int, winOptionVotes: Int, totalVotes: Int, canceledByTeam: Boolean) = {
   makeString(["%b%d%d%d%b",
@@ -112,49 +58,6 @@ func proposalData(proposalTxId: String, title: String, proposalTime: Int, voting
     quorumInGwl.toString(),   # 6
     options                     # 7 "NO:YES"
     ], SEP)
-}
-
-# data indices to access effective gWL array
-let IdxEffTotal = 0
-let IdxEffUser  = 1
-
-let recLandNum = 0
-let recLandSize = 1
-let recTerrains = 2
-let recContinent = 3
-
-func numPiecesBySize(landSize: String) = {
-  match (landSize) {
-    case "S" => SSIZE
-    case "M" => MSIZE
-    case "L" => LSIZE
-    case "XL" => XLSIZE
-    case "XXL" => XXLSIZE
-    case _ => throw("Unknown land size")
-  }
-}
-
-# get staked land pieces [total, user]
-func getVotingPower(userAddrStrOrEmpty: String) = {
-  let props = stakingContract.getString(keyResProportions()).valueOrElse("0_0_0_0_0_0").split("_")
-  
-  func adder(acc: Int, item: String) = acc + item.parseIntValue()
-  
-  let totalPower = FOLD<6>(props, 0, adder)
-
-  let usersPower = if (userAddrStrOrEmpty == "") then 0 else {
-  let landsStr = stakingContract.getString(keyStakedLandsByOwner(userAddrStrOrEmpty))
-  let lands = if (landsStr.isDefined()) then split_51C(landsStr.value(), "_") else []
-
-  func oneLand(acc: Int, landAssetId: String) = {
-    let asset = assetInfo(landAssetId.fromBase58String()).value()
-    let landSize = asset.description.split("_")[recLandSize]
-    acc + numPiecesBySize(landSize)
-  }
-  FOLD<100>(lands, 0, oneLand)
-}
-
-  [totalPower, usersPower]
 }
 
 # we can't rely on oldUserChoice, newUserChoice and currentWinner only, as some new leader can appear

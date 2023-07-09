@@ -1,2 +1,2 @@
 # ride
-Contract of waveslands.com
+Contracts of waveslands.com

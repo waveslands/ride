@@ -1,13 +1,8 @@
 {-# STDLIB_VERSION 6 #-}
 {-# CONTENT_TYPE DAPP #-}
 {-# SCRIPT_TYPE ACCOUNT #-}
+{-# IMPORT common.ride,landlib.ride,rpglib.ride #-}
 
-let chain = this.bytes.drop(1).take(1)
-let usdnAssetId = match(chain) {
-  case base16'57' => base58'DG2xFkPdDwKUoBkzGAhQtLpSGzfXLiCYPEzeKH2Ad24p'
-  case base16'54' => base58'HezsdQuRDtzksAYUy97gfhKy7Z1NW2uXYSHA3bgqenNZ'
-  case _ => throw("Unknown chain")
-}
 let incubatorAddr = match(chain) {
   case base16'57' => "3PEktVux2RhchSN63DsDo4b4mz4QqzKSeDv".addressFromStringValue()
   case base16'54' => this
@@ -18,142 +13,87 @@ let breederAddr = match(chain) {
   case base16'54' => this
   case _ => throw("Unknown chain")
 }
-let defaultRestAddressStr = match(chain) {
-  case base16'57' => "3PQCuvFbvh4LkPUnrnU1z3jnbA1p9m3WNhv"
-  case base16'54' => "3MumkGGztCKAXpWDqxkddofqXSUbqQkvSJy"
-  case _ => throw("Unknown chain")
-}
 let pub = base58'6LfPuKJjLgekmncBhMg2LZyMTNVzZBccXR28ySXm9uXD'
 
-let HEALCOST = 10000 # 1.000000 materials for 100 health units
-let LANDPREFIX = "LAND"
-let DUCKPREFIX = "DUCK"
-let DEFAULTLOCATION = "Africa_F_Africa"
-let NUMRES = 6
-let SSIZE = 25
-let MSIZE = 100
-let LSIZE = 225
-let XLSIZE = 400
-let XXLSIZE = 625
-let DAILYRESBYPIECE = 345_6000 # 0.03456000 (base value, not upgraded)
-let DAYMILLIS = 86_400_000 # 24*60*60*1000
+let medKitHp = [30, 60, 120] # levels 1, 2, 3
 let FIVEMINUTESMILLIS = 300_000 # 5*60*1000
-let RESOURCEPRICEMIN = 158549 # 0.158549 // 0.03456000 * 25 * 0.158549 = 0.136986336 USDN (20% APR)
-let WHMULTIPLIER = 100_0000_0000
-let InfraUpgradeCostS = match(chain) {
-  case base16'57' => 63_0719_8406 # 63.07198406 * L materials need to upgrade S land from (L-1) to L level
-  case base16'54' => 6307_1984 # 0.63071984 materials for testnet
-  case _ => throw("Unknown chain")
-}
-let InfraUpgradeCostSUsdn = match(chain) {
-  case base16'57' => 40_000_000 # $40 need to upgrade S land from (L-1) to L level
-  case base16'54' => 400_000 # $0.4 for testnet
-  case _ => throw("Unknown chain")
-}
+let RENAMINGCOST = 5_000_000
+let MAXNAMELEN = 50
+let InfraUpgradeCostSUsdt = 10_000_000 # $10 (was $40) * L need to upgrade S land from (L-1) to L level
 let EXPMATERIALS = match(chain) {
-  case base16'57' => 1576_7996_0139 # 1576.79960139 materials need to send expedition
-  case base16'54' => 15_7679_9601 # 15.76799601 materials for testnet
+  case base16'57' => 2522_8952_7462 # 2522.89527462 (was 1576.79960139) materials need to send expedition; EXPUSDT * 0.8 / (2 * RESOURCEPRICEMIN)
+  case base16'54' => 25_2289_5274 # /100 for testnet
   case _ => throw("Unknown chain")
 }
-let EXPUSDN = match(chain) {
-  case base16'57' => 1000_000_000 # $1000 to send expedition for money
-  case base16'54' => 10_000_000 # $10 for testnet
+let EXPUSDT = match(chain) {
+  case base16'57' => 250_000_000 # $250 (was $1000) to send expedition for money
+  case base16'54' => 250_000_000
   case _ => throw("Unknown chain")
 }
-let SEP = "__"
-let MULT6 = 1_000_000
 let FIVEX = toBigInt(5)
 let TWENTYX = toBigInt(20)
 let TWENTY2X = toBigInt(20*20)
 let TWENTY3X = toBigInt(20*20*20)
 let TWENTY4X = toBigInt(20*20*20*20)
 let TWENTY5X = toBigInt(20*20*20*20*20)
-let matTypes = ["Fuel", "Metal", "Plank", "Glass", "Plastic", "Protein"]
-let continents = ["Asia", "Europe", "Americas", "Oceania", "Africa"]
-let ARTPRESALE = "PRESALE"
 let PRESALENUMLANDS = 500
 
-func getStringOrFail(address: Address, key: String) = address.getString(key)
-    .valueOrErrorMessage(makeString(["mandatory ", address.toString(), ".", key, " is not defined"], ""))
-func getIntOrElse(key: String, defaultVal: Int) = this.getInteger(key).valueOrElse(defaultVal)
-
-# data indices from restConfig
-let IdxCfgStakingDapp    = 1
-let IdxCfgEconomyDapp    = 2
-let IdxCfgGovernanceDapp = 3
-
-func keyRestCfg() = "%s__restConfig"
-func keyRestAddress() = "%s__restAddr"
-
-func readRestCfgOrFail(rest: Address) = split_4C(rest.getStringOrFail(keyRestCfg()), SEP)
-func getContractAddressOrFail(restCfg: List[String], idx: Int) = restCfg[idx].addressFromString()
-  .valueOrErrorMessage("Rest cfg doesn't contain address at index " + idx.toString())
-
-# GLOBAL VARIABLES
-let restContract = this.getString(keyRestAddress()).valueOrElse(defaultRestAddressStr).addressFromStringValue()
-let restCfg = restContract.readRestCfgOrFail()
-let economyContract = restCfg.getContractAddressOrFail(IdxCfgEconomyDapp)
-let govContract = restCfg.getContractAddressOrFail(IdxCfgGovernanceDapp)
-
-func keyLastTxIdByUser(addr: String) = "lastTxIdByUser_" + addr
 func keyNextFreeLandNum() = "nextLandNum"
+# land specific keys (to be deleted after merge)
 func keyLandToAssetId(landNum: String) = "landToAsset_" + landNum
-func keyNftName(landNum: String, landSize: String) = LANDPREFIX + landNum + landSize
-func keyLandAssetIdToOwner(assetId: String) = "nftOwner_" + assetId
-func keyDuckIdToOwner(assetId: String) = "duckOwner_" + assetId
-func keyStakedTimeByAssetId(assetId: String) = "stakedTime_" + assetId
-func keyInfraLevelByAssetId(assetId: String) = "infraLevel_" + assetId
+#func keyLandAssetIdToOwner(assetId: String) = "nftOwner_" + assetId
+#func keyLandAssetIdToCustomName(assetId: String) = "landCustomNameByAssetId_" + assetId
+func keyLandCustomNameToAssetId(name: String) = "landByCustomName_" + name
+#func keyStakedTimeByAssetId(assetId: String) = "stakedTime_" + assetId # both land and duck assets
+#func keyInfraLevelByAssetId(assetId: String) = "infraLevel_" + assetId
 func keyInfraLevelByAssetIdAndOwner(assetId: String, ownerAddr: String) = "infraLevelByAssetIdAndOwner_" + assetId + "_" + ownerAddr
-func keyPresaleArtActivatedByAssetId(assetId: String) = "presaleArtActivated_" + assetId
-func keyPresaleArtActivatedByAssetIdAndOwner(assetId: String, ownerAddr: String) = "presaleArtActivatedByAssetIdAndOwner_" + assetId + "_" + ownerAddr
-func keyLandArtStatusByTypeAndAssetId(type: String, assetId: String) = makeString(["landArtStatus", type, assetId], "_")
+#func keyLandArtStatusByTypeAndAssetId(type: String, assetId: String) = makeString(["landArtStatus", type, assetId], "_")
 func keyLandArtStatusByTypeAssetIdAndOwner(type: String, assetId: String, ownerAddr: String) = 
     makeString(["landArtStatusByTypeAssetIdAndOwner", type, assetId, ownerAddr], "_")
-func keyStakedDuckByOwner(ownerAddr: String) = "stakedDuckByOwner_" + ownerAddr
-func keyStakedTimeByTypeAssetIdAndOwner(nftType: String, assetId: String, ownerAddr: String) =
-    "stakedTimeByTypeAssetIdAndOwner_" + nftType + "_" + assetId + "_" + ownerAddr
+#func keyStakedTimeByTypeAssetIdAndOwner(nftType: String, assetId: String, ownerAddr: String) =
+#    "stakedTimeByTypeAssetIdAndOwner_" + nftType + "_" + assetId + "_" + ownerAddr # both land and duck assets
+#func keyWarehouseByLand(landAssetId: String) = "wareHouse_" + landAssetId
 func keyLandNumToOwner(landNum: String) = "landOwner_" + landNum
-func keyBackpackByDuck(duckAssetId: String) = "backPack_" + duckAssetId
-func keyWarehouseByLand(landAssetId: String) = "wareHouse_" + landAssetId
-func keyDuckLocation(duckAssetId: String) = "duckLocation_" + duckAssetId
-func keyDuckHealth(duckAssetId: String) = "duckHealth_" + duckAssetId
-func keyResProportions() = "resTypesProportions"
-func keyStakedLandsByOwner(ownerAddr: String) = "stakedLandsByOwner_" + ownerAddr
-func keyBlocked() = "contractsBlocked"
+# land specific key (to be modified after merge)
+#func keyStakedLandsByOwner(ownerAddr: String) = "stakedLandsByOwner_" + ownerAddr
+
+#func keyDuckAssetIdToCustomName(assetId: String) = "duckCustomNameByAssetId_" + assetId
+#func keyAddressToCustomName(addr: String) = "accountCustomNameByAddr_" + addr
+func keyDuckCustomNameToAssetId(name: String) = "duckByCustomName_" + name
+func keyCustomNameToAddress(name: String) = "accountByCustomName_" + name
+#func keyAddressRefBy(addr: String) = "accRefBy_" + addr # if present, then addr has ONBOARD artifact
+#func keyAddressReferrals(addr: String) = "accReferrals_" + addr
+func keyOldies() = "oldiesList"
+#func keyDuckIdToOwner(assetId: String) = "duckOwner_" + assetId
+#func keyStakedDuckByOwner(ownerAddr: String) = "stakedDuckByOwner_" + ownerAddr
+#func keyBackpackByDuck(duckAssetId: String) = "backPack_" + duckAssetId
+#func keyDuckLocation(duckAssetId: String) = "duckLocation_" + duckAssetId
+#func keyDuckHealth(duckAssetId: String) = "duckHealth_" + duckAssetId
+#func keyResProportions() = "resTypesProportions"
+#func keyBlocked() = "contractsBlocked"
 # governance keys
-func keyUserGwlReleaseTime(userAddr: String) = "%s%s__userGwlReleaseTime__" + userAddr
+#func keyUserGwlReleaseTime(userAddr: String) = "%s%s__userGwlReleaseTime__" + userAddr
 
-let recLandNum = 0
-let recLandSize = 1
-let recTerrains = 2
-let recContinent = 3
-
-let locIdxContinent = 0
-let locIdxType = 1
-let locIdxId = 2
-
-# backpack groups:
-let bpIdxLevel = 0 # upgradeLevel
-let bpIdxRes = 1 # resList
-let bpIdxMat = 2 # matList
-let bpIdxProd = 3 # prodList
-
-# warehouse groups:
-let whIdxVol = 0 # warehouse volume prefix landIndex_infaLevel
-let whIdxRes = 1 # resList
-let whIdxMat = 2 # matList
-let whIdxProd = 3 # prodList
+# let testDucks = ["DUCK-DDDDDDDD-GG", "DUCK-BBBABAAA-HG", "DUCK-CCCBCBCC-IG", "DUCK-DDCADBAA-KG", 
+#   "DUCK-EEEDECBA-LG", "DUCK-FFEDECBA-MG", "DUCK-GGFDECBA-NG", "DUCK-HGFHEHHH-NG", 
+#   "DUCK-IGFDECBA-OG", "DUCK-KIGEFDCB-OG", "DUCK-LKIFGEDC-OG", "DUCK-ACACACAC-IG"
+# ]
 
 let claimModeWh = 0 # claim to warehouse only
 let claimModeDuck = 1 # claim to duck's backpack only
 let claimModeWhThenDuck = 2 # claim to warehouse until filled, then to duck's backpack
 
-func asString(v: Any) = {
-  match v {
-    case s: String => s
-    case _ => throw("fail to cast into String")
-  }
-}
+# flightLog groups
+let flHealth = 0
+let flMission = 1
+let flObstacles = 2
+let flWinds = 3
+let flPath = 4
+let flTimestamp = 5
+let flBonus = 6
+let flProdsUsed = 7
+
+func nftName(landNum: String, landSize: String) = LANDPREFIX + landNum + landSize
 
 # Given: total = amount to distribute; [w0, w1, w2, w3, w4, w5] = weights array
 # Find normalizing coeff. N, such as: N * (w0 + w1 + w2 + w3 + w4 + w5) = total
@@ -190,6 +130,34 @@ func subtractMaterials(shouldUseMat: Boolean, has: List[String], totalNeed: Int)
   if (shouldUseMat) then (FOLD<6>([0, 1, 2, 3, 4, 5], [], subtractor)) else has
 }
 
+# pUsed: 5,1_12,2 (product index, used quantity)
+func subtractProducts(pHas: String, pUsed: String) = {
+  if (pUsed == "") then pHas else
+  let pList = if (pHas == "") then [] else pHas.split("_")
+
+  func subP(acc: (Int, List[String]), item: String) = {
+    let j = acc._1
+
+    func checkUsed(ac: Int, idxAmt: String) = {
+      let parts = idxAmt.split(",")
+      if (parts.size() != 2) then throw("Incorrect format, should be index,amount") else
+      let idx = parts[0].parseIntValue()
+      if (idx < 0 || idx >= productionMatrix.size()) then throw("Unknown product idx") else
+      if (idx != j) then ac else {
+        let amt = parts[1].parseIntValue()
+        if (amt <= 0) then throw("Pass only positive amounts") else
+        ac + amt
+      }
+    }
+    let a = FOLD<10>(pUsed.split("_"), 0, checkUsed)
+    let curr = if (j < pList.size()) then pList[j].parseIntValue() else 0
+    let newAmt = if (curr < a) then throw("You have " + curr.toString() + " of " + prodTypes[j] + ", but tried to use " + a.toString()) else curr - a
+    (j + 1, acc._2 :+ newAmt.toString())
+  }
+  let newProd = FOLD<50>(productionMatrix, (0, []), subP)
+  makeString(newProd._2, "_")
+}
+
 func updateProportionsInternal(propList: List[String], terrainCounts: List[Int], landSizeIndex: Int, sign: Int) = {
   if (propList.size() != NUMRES) then throw("Wrong proportions data") else
   func updater(acc: List[String], i: Int) = {
@@ -216,27 +184,6 @@ func countTerrains(terrains: String) = {
     terrains.split("D").size() - 1,
     terrains.split("E").size() - 1,
     terrains.split("F").size() - 1]
-}
-
-func numPiecesBySize(landSize: String) = {
-  match (landSize) {
-    case "S" => SSIZE
-    case "M" => MSIZE
-    case "L" => LSIZE
-    case "XL" => XLSIZE
-    case "XXL" => XXLSIZE
-    case _ => throw("Unknown land size")
-  }
-}
-
-# decrease one element in aList[idx] by amount, keep other elements
-func subOneInList(aList: List[String], idx: Int, amount: Int) = {
-
-  func subber(acc: List[String], i: Int) = {
-    acc :+ if (i == idx) then (aList[i].parseIntValue() - amount).toString() else aList[i]
-  }
-  let r = FOLD<6>([0, 1, 2, 3, 4, 5], [], subber)
-  r.makeString("_")
 }
 
 func addRes(currentRes: List[String], terrainCounts: List[Int], deltaTime: Int, landSizeIndex: Int, dailyByPieceWithBonuses: Int) = {
@@ -283,11 +230,11 @@ func distributeRes(currentWhRes: List[String], currentPackRes: List[String], res
 func abs(x: BigInt) = if (x >= toBigInt(0)) then x else -x
 
 let freq = [ # frequency of different terrains per continent
-  [1, 4, 9, 10, 15],  # Asia     [1, 3, 5, 1, 5, 5]
-  [5, 8, 13, 14, 15], # Europe   [5, 3, 5, 1, 1, 5]
   [6, 9, 14, 15, 16], # Americas [6, 3, 5, 1, 1, 4]
-  [4, 7, 8, 13, 18],  # Oceania  [4, 3, 1, 5, 5, 2]
-  [1, 6, 7, 15, 19]   # Africa   [1, 5, 1, 8, 4, 1]
+  [5, 8, 13, 14, 15], # Europe   [5, 3, 5, 1, 1, 5]
+  [1, 4, 9, 10, 15],  # Asia     [1, 3, 5, 1, 5, 5]
+  [1, 6, 7, 15, 19],  # Africa   [1, 5, 1, 8, 4, 1]
+  [4, 7, 8, 13, 18]   # Oceania  [4, 3, 1, 5, 5, 2]
 ]
 
 func genChar(n: BigInt, freqs: List[Int]) = {
@@ -315,60 +262,84 @@ func genTerrains(seed: BigInt, continentIdx: Int) = {
   t._1
 }
 
+# return 4 strings: [level, resListStr, matListStr, prodListStr]
 func getBackpack(bpKey: String) = {
   let p = getString(bpKey).valueOrElse("0:0_0_0_0_0_0:0_0_0_0_0_0:").split(":")
   [
     p[bpIdxLevel].parseInt().valueOrElse(0).toString(),
     if (p[bpIdxRes].split("_").size() == NUMRES) then p[bpIdxRes] else "0_0_0_0_0_0",
     if (p[bpIdxMat].split("_").size() == NUMRES) then p[bpIdxMat] else "0_0_0_0_0_0",
-    # "" if no products;     product0:                     product1:
-    p[bpIdxProd] # numItems1,numItems2,numItems3_numItems1,numItems2,numItems3...
+    p[bpIdxProd] # "" if no products
   ]
 }
 
 # warehouse volume prefix is landIndex_infaLevel
-func getWarehouseVolume(volPrefix: String) = {
+func getWarehouseTotalVolume(volPrefix: String) = {
   let parts = volPrefix.split("_")
   WHMULTIPLIER * (parts[1].parseIntValue() + 1) * parts[0].parseIntValue()
 }
 
+func getWarehouseOccupiedVol(currentWh: List[String]) = {
+  let goods = currentWh[whIdxProd]
+
+  func sumResMat(acc: Int, item: String) = {
+    acc + item.parseIntValue()
+  }
+
+  # acc: (productIndex, productsVolume)
+  func sumProd(acc: (Int, Int), item: String) = {
+    let idx = acc._1
+    let pkgSize = getPkgSize(idx)
+    let pkgs = (item.parseIntValue() + pkgSize - 1) / pkgSize
+    (idx + 1, acc._2 + pkgs * MULT8)
+  }
+  let whResVol = FOLD<6>(currentWh[whIdxRes].split("_"), 0, sumResMat)
+  let whMatVol = FOLD<6>(currentWh[whIdxMat].split("_"), 0, sumResMat)
+  let whGoodsVol = if (goods == "") then 0 else (FOLD<50>(split_4C(goods, "_"), (0, 0), sumProd))._2
+  whResVol + whMatVol + whGoodsVol
+}
+
+# return 5 strings: [volPrefix, resListStr, matListStr, prodListStr, locked_occupied_free_totalVol]
 func getWarehouse(whKey: String, landIndex: Int, infraLevel: Int) = {
   let volPrefix = landIndex.toString() + "_" + infraLevel.toString()
-  let p = getString(whKey).valueOrElse(volPrefix + ":0_0_0_0_0_0:0_0_0_0_0_0:").split(":")
+  let whTotal = getWarehouseTotalVolume(volPrefix)
+  let whStr = getString(whKey).valueOrElse(volPrefix + ":0_0_0_0_0_0:0_0_0_0_0_0::0")
+  let wh = split_4C(whStr, ":")
+  let whOccupied = getWarehouseOccupiedVol(wh)
+  let whLoft = if (wh.size() < 5) then {
+    makeString(["0", whOccupied.toString(), toString(whTotal - whOccupied), whTotal.toString()], "_")
+  } else {
+    let loft = wh[whIdxLOFT].split("_")
+    let whLocked = loft[volLocked].parseIntValue()
+    let occ = if (loft.size() > 1) then loft[volOccupied].parseIntValue() else whOccupied
+    makeString([whLocked.toString(), occ.toString(), toString(whTotal - whLocked - occ), whTotal.toString()], "_")
+  }
   [
-    p[whIdxVol],
-    if (p[whIdxRes].split("_").size() == NUMRES) then p[whIdxRes] else "0_0_0_0_0_0",
-    if (p[whIdxMat].split("_").size() == NUMRES) then p[whIdxMat] else "0_0_0_0_0_0",
-    # "" if no products;     product0:                     product1:
-    p[whIdxProd] # numItems1,numItems2,numItems3_numItems1,numItems2,numItems3...
+    wh[whIdxLevels],
+    if (wh[whIdxRes].split("_").size() == NUMRES) then wh[whIdxRes] else "0_0_0_0_0_0",
+    if (wh[whIdxMat].split("_").size() == NUMRES) then wh[whIdxMat] else "0_0_0_0_0_0",
+    wh[whIdxProd], # "" if no products
+    whLoft # locked_occupied_free_total
   ]
 }
 
-func getWarehouseCurrResVolume(currentWh: List[String]) = {
-  func sum(acc: Int, item: String) = {
-    acc + item.parseIntValue()
-  }
-  FOLD<6>(currentWh[whIdxRes].split("_"), 0, sum)
+func getWarehouseSpaceLeft(currentWh: List[String]) = {
+  let occupiedVol = getWarehouseOccupiedVol(currentWh)
+  let currWhLockedVol = currentWh[whIdxLOFT].split("_")[volLocked].parseIntValue()
+
+  getWarehouseTotalVolume(currentWh[whIdxLevels]) - occupiedVol - currWhLockedVol
 }
 
-func getWarehouseCurrMatVolume(currentWh: List[String]) = {
-  func sum(acc: Int, item: String) = {
-    acc + item.parseIntValue()
-  }
-  FOLD<6>(currentWh[whIdxMat].split("_"), 0, sum)
-}
-
-func getWarehouseCurrGoodsVolume(currentWh: List[String]) = {
-  let goods = currentWh[whIdxProd]
-  if (goods == "") then 0 else
-  func sum(acc: Int, item: String) = {
-    acc + item.parseIntValue()
-  }
-  FOLD<50>(split_4C(goods, "_"), 0, sum)
+func toVolume(amount: Int, pkgSize: Int) = {
+  let pkgs = if (amount >= 0) then (amount + pkgSize - 1) / pkgSize else -((-amount + pkgSize - 1) / pkgSize)
+  pkgs * MULT8
 }
 
 # zero amount means ignore position
 # '-' means direction from warehouse to backpack, '+' - from backpack to warehouse
+# cargoParts: list of 3 strings: resListStr, matListStr, prodListStr
+# currentWh: list of 5 strings: [volPrefix, resListStr, matListStr, prodListStr, lockedVol]
+# currentPack: list of 4 strings: [level, resListStr, matListStr, prodListStr]
 func moveStuff(cargoParts: List[String], currentWh: List[String], currentPack: List[String]) = {
   if (cargoParts.size() != 3) then throw("cargoListStr should contain exactly 2 ':' separators") else
   let resParts = cargoParts[0].split("_")
@@ -376,15 +347,11 @@ func moveStuff(cargoParts: List[String], currentWh: List[String], currentPack: L
   let prodParts = if (cargoParts[2] == "") then [] else cargoParts[2].split("_")
   if (resParts.size() != NUMRES) then throw("All 6 resources should be passed") else
   if (matParts.size() != NUMRES) then throw("All 6 materials should be passed") else
-
-  let currWhResVol = getWarehouseCurrResVolume(currentWh)
-  let currWhMatVol = getWarehouseCurrMatVolume(currentWh)
-  let currWhGoodsVol = getWarehouseCurrGoodsVolume(currentWh)
-  let whSpaceLeft = getWarehouseVolume(currentWh[whIdxVol]) - currWhResVol - currWhMatVol - currWhGoodsVol
+  let whSpaceLeft = getWarehouseSpaceLeft(currentWh)
 
   let currWhRes = currentWh[whIdxRes].split("_") # resources already in warehouse
   let currWhMat = currentWh[whIdxMat].split("_") # materials already in warehouse
-  let currWhProd = if (currentWh[bpIdxProd] == "") then [] else currentWh[whIdxProd].split("_") # products already in warehouse
+  let currWhProd = if (currentWh[whIdxProd] == "") then [] else currentWh[whIdxProd].split("_") # products already in warehouse
 
   let currentPackRes = currentPack[bpIdxRes].split("_") # resources already in backpack
   let currentPackMat = currentPack[bpIdxMat].split("_") # materials already in backpack
@@ -424,26 +391,30 @@ func moveStuff(cargoParts: List[String], currentWh: List[String], currentPack: L
   }
   let m = FOLD<6>(matParts, (0, [], [], r._4), mvM)
 
+  # acc: counter, whProd, bpProd, volume
   func mvP(acc: (Int, List[String], List[String], Int), item: String) = {
     let i = acc._1
+    let pkgSize = getPkgSize(i)
     let am = item.parseIntValue()
-    let whp = currWhProd[i].parseIntValue()
-    let bpp = currentPackProd[i].parseIntValue()
+    let whp = if (currWhProd.size() > i) then currWhProd[i].parseIntValue() else 0
+    let bpp = if (currentPackProd.size() > i) then currentPackProd[i].parseIntValue() else 0
     if (am == 0) then {
-      (i+1, acc._2 :+ currWhProd[i], acc._3 :+ currentPackProd[i], acc._4)
+      (i+1, acc._2 :+ whp.toString(), acc._3 :+ bpp.toString(), acc._4)
     } else if (am > 0) then { # move from bp to wh
       if (bpp < am) then throw("Attempt to take " + item + " from backpack, but only " + bpp.toString() + " available") else
-      (i+1, acc._2 :+ toString(whp + am), acc._3 :+ toString(bpp - am), acc._4 + am)
+      let deltaVol = toVolume(whp + am, pkgSize) - toVolume(whp, pkgSize)
+      (i+1, acc._2 :+ toString(whp + am), acc._3 :+ toString(bpp - am), acc._4 + deltaVol)
     } else { # move from wh to bp
       if (whp < -am) then throw("Attempt to take " + toString(-am) + " from warehouse, but only " + whp.toString() + " available") else
-      (i+1, acc._2 :+ toString(whp + am), acc._3 :+ toString(bpp - am), acc._4 + am)
+      let deltaVol = toVolume(whp + am, pkgSize) - toVolume(whp, pkgSize)
+      (i+1, acc._2 :+ toString(whp + am), acc._3 :+ toString(bpp - am), acc._4 + deltaVol)
     }
   }
-  let p = FOLD<50>(prodParts, (0, [], [], m._4), mvP)
+  let p = if (prodParts.size() != 0) then (FOLD<50>(prodParts, (0, [], [], m._4), mvP)) else (0, currWhProd, currentPackProd, m._4)
   let volSaldo = p._4 # positive means amount to put in WH
   if (whSpaceLeft < volSaldo) then throw("Attempt to put total " + volSaldo.toString() + " stuff, but only " + whSpaceLeft.toString() + " warehouse space left") else
   # (whRes, whMat, whProd, bpRes, bpMat, bpProd)
-  (makeString(r._2, "_"), makeString(m._2, "_"), makeString(p._2, "_"), makeString(r._3, "_"), makeString(m._3, "_"), makeString(p._3, "_"))
+  (makeString(r._2, "_"), makeString(m._2, "_"), makeString(p._2, "_"), makeString(r._3, "_"), makeString(m._3, "_"), makeString(p._3, "_"), volSaldo)
 }
 
 func expeditionInternal(caller: Address, txId: ByteVector) = {
@@ -454,7 +425,7 @@ func expeditionInternal(caller: Address, txId: ByteVector) = {
   let continentIdx = toInt(bigNum % FIVEX)
   let terrains = genTerrains(bigNum, continentIdx)
   let continent = continents[continentIdx]
-  let issue = Issue(keyNftName(landNum, "S"), # name: LAND13S
+  let issue = Issue(nftName(landNum, "S"), # name: LAND13S
     makeString([landNum, "S", terrains, continent], "_"), # description: "13_S_CEBBEFECCCFEEADECBDECEDBC_Asia"
     1, 0, false)
   let assetId = calculateAssetId(issue)
@@ -471,46 +442,66 @@ func expeditionInternal(caller: Address, txId: ByteVector) = {
   ], (id, continent))
 }
 
-func expeditionCommon(shouldUseMat: Boolean, caller: Address, txId: ByteVector, message: ByteVector, sig: ByteVector) = {
+#  Health|Mission|       Obstcales        |         Winds           |  Path  |  Timestamp  |Bonus|Prod used;newLocation: lastTxId : version
+# 240_240|6,6_0,0|K3,1_A0,1_F0,5_C1,4_T5,5|WWWWWWWWWWWWWWWWWWWWWWWWW|NNEENWWW|1685994541854|20hp|5,1_12,2;?_E_?:4NVYtGU1DgdxZVn6fUEbbq34VLZzSdi8nRnzWUoKuHQj:3
+func flightCommon(userAddr: String, message: ByteVector, sig: ByteVector) = {
   if (!sigVerify_8Kb(message, sig, pub)) then throw("signature does not match") else
   let parts = message.toUtf8String().split(";")
-  let hp = parts[0].split("|")[0].split("_")
+  let flightLog = parts[0].split("|")
+  let hp = flightLog[flHealth].split("_")
   let curHP = hp[0].parseIntValue()
   let newHP = hp[1].parseIntValue()
-  let locAndTime = parts[1].split(":")
-  let targetLocation = locAndTime[0].split("_")
-  if (targetLocation[1] != "E") then throw("expedition target location type should be E") else
-  let time = locAndTime[1].parseIntValue()
+  let newLocTxVer = parts[1].split(":")
+  let newLocation = newLocTxVer[0]
+  let time = flightLog[flTimestamp].parseIntValue()
   if ((time > lastBlock.timestamp + FIVEMINUTESMILLIS) ||
-    (time < lastBlock.timestamp - FIVEMINUTESMILLIS)) then throw("signature outdated") else
-  let userAddr = caller.toString()
+    (time < lastBlock.timestamp - FIVEMINUTESMILLIS)) then throw("signature outdated: logTime=" + time.toString() + ", bcTime=" + toString(lastBlock.timestamp)) else
+  let txFromMsg = newLocTxVer[1]
+  let lastTx = getString(keyLastTxIdByUser(userAddr)).valueOrElse("")
+  if (lastTx != txFromMsg) then throw("Tx ids don't match! In state: " + lastTx + ", in msg: " + txFromMsg) else
   let duckAssetId = getString(keyStakedDuckByOwner(userAddr)).valueOrErrorMessage("You don't have a duck staked")
   let keyHealth = keyDuckHealth(duckAssetId)
-  let oldFromState = getInteger(keyHealth).valueOrElse(100)
-  if (oldFromState != curHP) then throw("oldHealth=" + getInteger(keyHealth).valueOrElse(100).toString() + " from state does not match one from flight log=" + curHP.toString()) else
+  let maxHP = maxHealth(getInteger(keyDuckLevel(duckAssetId)).valueOrElse(0))
+  let oldFromState = getInteger(keyHealth).valueOrElse(maxHP)
+  if (oldFromState != curHP) then throw("oldHealth=" + oldFromState.toString() + " from state does not match one from flight log=" + curHP.toString()) else
   if (curHP <= 0) then throw("You can't fly with zero health") else
-  if (newHP <= 0) then ((if (!shouldUseMat) then [ScriptTransfer(caller, EXPUSDN, usdnAssetId)] else []) :+ IntegerEntry(keyHealth, 0), "") else
+  let bonus = if (flightLog.size() > flBonus) then flightLog[flBonus] else ""
+  let prodUsed = if (flightLog.size() > flProdsUsed) then flightLog[flProdsUsed] else ""
+  let sentAmount = if (newHP > 0 && bonus == "$") then restContract.invoke("sendUsdtPrize", [userAddr], []).asInt() else 0
+  (newHP, duckAssetId, sentAmount, newLocation, prodUsed)
+}
 
-  let bpKey = keyBackpackByDuck(duckAssetId)
+func expeditionCommon(caller: Address, txId: ByteVector, message: ByteVector, sig: ByteVector) = {
+  let userAddr = caller.toString()
+  let f = flightCommon(userAddr, message, sig) # (newHP, duckAssetId, sentAmount, newLocation, prodUsed)
+  let keyHealth = keyDuckHealth(f._2)
+  let bpKey = keyBackpackByDuck(f._2)
   let currentPack = getBackpack(bpKey)
   let mList = currentPack[bpIdxMat].split("_")
-  let newMat = makeString(subtractMaterials(shouldUseMat, mList, EXPMATERIALS), "_")
+  let newMat = makeString(subtractMaterials(true, mList, EXPMATERIALS), "_")
+  let newProd = subtractProducts(currentPack[bpIdxProd], f._5)
+
+  if (f._1 <= 0) then (
+    [ IntegerEntry(keyHealth, 0), 
+      StringEntry(bpKey, makeString([currentPack[bpIdxLevel], currentPack[bpIdxRes], currentPack[bpIdxMat], newProd], ":"))
+    ], "", 0) else
 
   let e = expeditionInternal(caller, txId)
   let id = e._2._1
   (e._1
-  :+ StringEntry(keyDuckLocation(duckAssetId), makeString([e._2._2, "L", id], "_"))
-  :+ IntegerEntry(keyHealth, newHP)
-  :+ StringEntry(bpKey, makeString([currentPack[bpIdxLevel], currentPack[bpIdxRes], newMat, currentPack[bpIdxProd]], ":")),
-  id)
+  :+ StringEntry(keyDuckLocation(f._2), makeString([e._2._2, "L", id], "_"))
+  :+ IntegerEntry(keyHealth, f._1)
+  :+ StringEntry(bpKey, makeString([currentPack[bpIdxLevel], currentPack[bpIdxRes], newMat, newProd], ":")),
+  id, f._3)
 }
 
 func applyBonuses(landAssetId: String, pieces: Int) = {
   let infraLevel = getInteger(keyInfraLevelByAssetId(landAssetId)).valueOrElse(0)
-  # base * (1 + 0.25*Level + 0.15*(isActive ? artPieces/pieces : 0))
-  let artPieces = getInteger(keyLandArtStatusByTypeAndAssetId(ARTPRESALE, landAssetId))
-    .valueOrElse(if (getBoolean(keyPresaleArtActivatedByAssetId(landAssetId)).valueOrElse(false)) then pieces else 0)
-  DAILYRESBYPIECE + fraction(DAILYRESBYPIECE, infraLevel, 4) + fraction(DAILYRESBYPIECE, artPieces * 3, pieces * 20)
+  # base * (1 + 0.2*Level + 0.2*(isActive ? artPieces/pieces : 0))
+  let artPieces = getInteger(keyLandArtStatusByTypeAndAssetId(ARTPRESALE, landAssetId)).valueOrElse(0)
+  let add6 = infraLevel / 6 # 0 for levels 0..5, 1 otherwise
+  let add7 = infraLevel / 7 # 0 for levels 0..6, 1 otherwise
+  DAILYRESBYPIECE + fraction(DAILYRESBYPIECE, (infraLevel + add6 + 2*add7), 5) + fraction(DAILYRESBYPIECE, artPieces, pieces * 5)
 }
 
 func checkClaimConditions(addr: String, claimMode: Int, landAssetIdIn: String) = {
@@ -548,29 +539,29 @@ func claimResInternal(addr: String, amount: Int, claimMode: Int, landAssetIdIn: 
   let whKey = keyWarehouseByLand(c._2)
   let infraLevel = getInteger(keyInfraLevelByAssetId(c._2)).valueOrElse(0)
   let currentWh = getWarehouse(whKey, landIndex, infraLevel)
-  let currWhResVol = getWarehouseCurrResVolume(currentWh)
-  let currWhMatVol = getWarehouseCurrMatVolume(currentWh)
-  let currWhGoodsVol = getWarehouseCurrGoodsVolume(currentWh)
-  let whSpaceLeft = getWarehouseVolume(currentWh[whIdxVol]) - currWhResVol - currWhMatVol - currWhGoodsVol
+  let loft = currentWh[whIdxLOFT].split("_")
+  let whSpaceLeft = loft[volFree].parseIntValue()
   if (claimMode == claimModeWh && amount > whSpaceLeft) then throw("Only " + whSpaceLeft.toString() + " space left in warehouse") else
 
   let bpKey = keyBackpackByDuck(c._1)
   let currentPack = getBackpack(bpKey)
   let currentPackRes = currentPack[bpIdxRes].split("_") # resources already in backpack
   let currentWhRes = currentWh[whIdxRes].split("_") # resources already in warehouse
-  let (whRes, bpRes) = if (claimMode == claimModeWh) then
-    (addRes(currentWhRes, terrainCounts, deltaTime - newDeltaTime, landIndex, dailyProductionByPiece), currentPack[bpIdxRes])
+  let (whRes, bpRes, loftO, loftF) = if (claimMode == claimModeWh) then
+    (addRes(currentWhRes, terrainCounts, deltaTime - newDeltaTime, landIndex, dailyProductionByPiece), currentPack[bpIdxRes], loft[volOccupied].parseIntValue() + resToClaim._2, loft[volFree].parseIntValue() - resToClaim._2)
   else if (claimMode == claimModeDuck) then
-    (currentWh[whIdxRes], addRes(currentPackRes, terrainCounts, deltaTime - newDeltaTime, landIndex, dailyProductionByPiece))
-  else # claimModeWhThenDuck - distribute resToClaim by warehouse and backpack
-    distributeRes(currentWhRes, currentPackRes, resToClaim, whSpaceLeft)
-
+    (currentWh[whIdxRes], addRes(currentPackRes, terrainCounts, deltaTime - newDeltaTime, landIndex, dailyProductionByPiece), loft[volOccupied].parseIntValue(), loft[volFree].parseIntValue())
+  else { # claimModeWhThenDuck - distribute resToClaim by warehouse and backpack
+    let distr = distributeRes(currentWhRes, currentPackRes, resToClaim, whSpaceLeft)
+    let whAm = min([loft[volFree].parseIntValue(), resToClaim._2])
+    (distr._1, distr._2, loft[volOccupied].parseIntValue() + whAm, loft[volFree].parseIntValue() - whAm)
+  }
   ([IntegerEntry(keyStakedTimeByAssetId(c._2), newTimestamp),
     IntegerEntry(keyStakedTimeByTypeAssetIdAndOwner(LANDPREFIX, c._2, addr), newTimestamp)], 
     bpKey, # StringEntry(bpKey, newPack) - should be saved by calling code
     [currentPack[bpIdxLevel], bpRes, currentPack[bpIdxMat], currentPack[bpIdxProd]],
     whKey, # StringEntry(whKey, newWarehouse) - should be saved by calling code
-    [currentWh[whIdxVol], whRes, currentWh[whIdxMat], currentWh[whIdxProd]]
+    [currentWh[whIdxLevels], whRes, currentWh[whIdxMat], currentWh[whIdxProd], makeString([loft[volLocked], toString(loftO), toString(loftF), loft[volTotal]], "_")]
   ) # (timeActions, bpKey, backpackList, whKey, warehouseList)
 }
 
@@ -582,7 +573,7 @@ func claimAll(addr: String, landAssetId: String, pieces: Int, claimMode: Int) = 
 }
 
 func upInfraCommon(shouldUseMat: Boolean, caller: Address, paymentAmount: Int, landAssetId: String) = {
-#  if (caller != this) then throw("temporary disabled") else
+ #  if (caller != this) then throw("temporary disabled") else
   let addr = caller.toString()
   let c = checkClaimConditions(addr, claimModeWhThenDuck, landAssetId) # (duckAssetId, landAssetId, d, savedTime)
   let pieces = numPiecesBySize(c._3[recLandSize])
@@ -590,36 +581,83 @@ func upInfraCommon(shouldUseMat: Boolean, caller: Address, paymentAmount: Int, l
   let curLevel = getInteger(infraKey).valueOrElse(0)
   if (curLevel >= 3) then throw("Currently max infrastructure level = 3") else
   let newLevel = curLevel + 1
-  let cost = fraction(InfraUpgradeCostSUsdn, pieces * newLevel, SSIZE)
+  let cost = fraction(InfraUpgradeCostSUsdt, pieces * newLevel, SSIZE)
   if (!shouldUseMat && paymentAmount != cost) then throw("Payment attached should be " + cost.toString()) else
   let bpKey = keyBackpackByDuck(c._1)
   let currentPack = getBackpack(bpKey)
   let mList = currentPack[bpIdxMat].split("_")
-  let newMat = makeString(subtractMaterials(shouldUseMat, mList, fraction(InfraUpgradeCostS, pieces * newLevel, SSIZE)), "_")
+  let matUsed = fraction(InfraUpgradeCostS, pieces * newLevel, SSIZE)
+  let newMat = makeString(subtractMaterials(shouldUseMat, mList, matUsed), "_")
   let claimResult = claimAll(addr, c._2, pieces, claimModeWhThenDuck) # (timeActions, bpKey, backpackList, whKey, warehouseList)
   let whData = claimResult._5
-  let newVolData = makeString([whData[whIdxVol].split("_")[0], newLevel.toString()], "_")
+  let oldVol = getWarehouseTotalVolume(whData[whIdxLevels])
+  let newVolData = makeString([whData[whIdxLevels].split("_")[0], newLevel.toString()], "_")
+  let newVol = getWarehouseTotalVolume(newVolData)
+  let loft = whData[whIdxLOFT].split("_")
+  let newLoftStr = makeString([loft[volLocked], loft[volOccupied], toString(loft[volFree].parseIntValue() + newVol - oldVol), toString(newVol)], "_")
   ([IntegerEntry(infraKey, newLevel),
     IntegerEntry(keyInfraLevelByAssetIdAndOwner(c._2, addr), newLevel),
     StringEntry(bpKey, makeString([currentPack[bpIdxLevel], claimResult._3[bpIdxRes], newMat, currentPack[bpIdxProd]], ":")),
-    StringEntry(claimResult._4, makeString([newVolData, whData[whIdxRes], whData[whIdxMat], whData[whIdxProd]], ":"))] # warehouse data
+    StringEntry(claimResult._4, makeString([newVolData, whData[whIdxRes], whData[whIdxMat], whData[whIdxProd], newLoftStr], ":"))] # warehouse data
     ++ claimResult._1, # timeActions from claimAll
-    newLevel)
+    newLevel, matUsed)
+}
+
+func updateDuckStatsInternal(duckAssetId: String, deltaXP: Int) = {
+  let lvlKey = keyDuckLevel(duckAssetId)
+  let xpKey = keyDuckXP(duckAssetId)
+  let xp = stakingContract.getInteger(xpKey).valueOrElse(0)
+  let newXP = xp + deltaXP
+  let lvlPoints = levelUp(stakingContract.getInteger(lvlKey).valueOrElse(0), newXP)
+  let keyPoints = keyDuckFreePoints(duckAssetId)
+  ([
+    IntegerEntry(lvlKey, lvlPoints[0]),
+    IntegerEntry(xpKey, newXP),
+    IntegerEntry(keyPoints, getInteger(keyPoints).valueOrElse(0) + lvlPoints[1])
+  ], newXP)
+}
+
+func updateAccStatsInternal(addr: String, deltaXP: Int) = {
+  let lvlKey = keyUserLevel(addr)
+  let xpKey = keyUserXP(addr)
+  let xp = stakingContract.getInteger(xpKey).valueOrElse(0)
+  let newXP = xp + deltaXP
+  let lvlPoints = levelUp(stakingContract.getInteger(lvlKey).valueOrElse(0), newXP)
+  let keyPoints = keyUserFreePoints(addr)
+  ([
+    IntegerEntry(lvlKey, lvlPoints[0]),
+    IntegerEntry(xpKey, newXP),
+    IntegerEntry(keyPoints, getInteger(keyPoints).valueOrElse(0) + lvlPoints[1])
+  ], newXP)
+}
+
+func activateOnboardArt(addr: String) = {
+  let duckAssetId = getString(keyStakedDuckByOwner(addr)).valueOrErrorMessage("You don't have a duck staked")
+  let refByKey = keyAddressRefBy(addr)
+  let refBy = getString(refByKey)
+  if (!refBy.isDefined()) then throw("You are not eligible for ONBOARD artifact") else
+  let artKey = keyOnboardArtDuckActivatedBy(addr)
+  let artDuck = getString(artKey)
+  if (artDuck.isDefined()) then throw("You already used your ONBOARD artifact on duck " + artDuck.value()) else
+  let duckActivatorKey = keyOnboardArtActivatedOnDuck(duckAssetId)
+  let duckActivator = getString(duckActivatorKey)
+  if (duckActivator.isDefined()) then throw("The duck " + duckAssetId + " already got points from ONBOARD artifact from user " + duckActivator.value()) else
+  [ StringEntry(artKey, duckAssetId),
+    StringEntry(duckActivatorKey, addr)]
+  ++ updateDuckStatsInternal(duckAssetId, xpOnboard)._1
 }
 
 func activatePresaleArt(addr: String, landAssetIdIn: String) = {
   let c = checkClaimConditions(addr, claimModeWhThenDuck, landAssetIdIn) # (duckAssetId, landAssetId, d, savedTime)
   let landAssetId = c._2
-  let activationKey = keyPresaleArtActivatedByAssetId(landAssetId)
-  if (getBoolean(activationKey).valueOrElse(false)) then throw("Presale artifact is already activated") else
-  if (c._3[recLandNum].parseIntValue() > PRESALENUMLANDS) then throw(LANDPREFIX + " " + landAssetId + " is not eligible for presale artifact") else
   let pieces = numPiecesBySize(c._3[recLandSize])
+  let activationKey = keyLandArtStatusByTypeAndAssetId(ARTPRESALE, landAssetId)
+  if (getInteger(activationKey).valueOrElse(0) > 0) then throw("Presale artifact is already activated") else
+  if (c._3[recLandNum].parseIntValue() > PRESALENUMLANDS) then throw(LANDPREFIX + " " + landAssetId + " is not eligible for presale artifact") else
   let claimResult = claimAll(addr, landAssetId, pieces, claimModeWhThenDuck) # (timeActions, bpKey, backpackList, whKey, warehouseList)
   
   claimResult._1 # timeActions from claimAll
-  :+ BooleanEntry(activationKey, true)
-  :+ BooleanEntry(keyPresaleArtActivatedByAssetIdAndOwner(landAssetId, addr), true)
-  :+ IntegerEntry(keyLandArtStatusByTypeAndAssetId(ARTPRESALE, landAssetId), pieces)
+  :+ IntegerEntry(activationKey, pieces)
   :+ IntegerEntry(keyLandArtStatusByTypeAssetIdAndOwner(ARTPRESALE, landAssetId, addr), pieces)
   :+ StringEntry(claimResult._2, makeString(claimResult._3, ":")) # bpKey, backpackList
   :+ StringEntry(claimResult._4, makeString(claimResult._5, ":")) # whKey, warehouseList
@@ -628,7 +666,7 @@ func activatePresaleArt(addr: String, landAssetIdIn: String) = {
 func mergeInternal(newLandSize: String, newLevel: Int, formula: String, addr: String, landAssetIds: List[String], txId: ByteVector, needMat: Int) = {
   let duckAssetId = getString(keyStakedDuckByOwner(addr)).valueOrErrorMessage("You don't have a duck staked")
 
-  func checkMerge(acc: (String, Int, String, String, List[DeleteEntry|Burn], String, List[String]), landAssetId: String) = {
+  func checkMerge(acc: (String, Int, String, String, List[DeleteEntry|Burn], String, List[String], Int), landAssetId: String) = {
     let asset = assetInfo(landAssetId.fromBase58String()).value()
     let timeKey = keyStakedTimeByAssetId(landAssetId)
     let savedTime = getInteger(timeKey).valueOrErrorMessage("NFT " + asset.name + " is not staked")
@@ -642,8 +680,7 @@ func mergeInternal(newLandSize: String, newLevel: Int, formula: String, addr: St
     let i = sizesIn.indexOf(landSize).valueOrErrorMessage("You haven't passed all the lands needed")
     let sizesOut = sizesIn.take(i) + sizesIn.drop(i+1)
     let pieces = numPiecesBySize(landSize)
-    let arts = acc._2 + getInteger(keyLandArtStatusByTypeAndAssetId(ARTPRESALE, landAssetId))
-      .valueOrElse(if (getBoolean(keyPresaleArtActivatedByAssetId(landAssetId)).valueOrElse(false)) then pieces else 0)
+    let arts = acc._2 + getInteger(keyLandArtStatusByTypeAndAssetId(ARTPRESALE, landAssetId)).valueOrElse(0)
     let infraLevel = getInteger(keyInfraLevelByAssetId(landAssetId)).valueOrElse(0)
     let reqLevel = match(landSize) {
       case "S" => 3
@@ -665,22 +702,23 @@ func mergeInternal(newLandSize: String, newLevel: Int, formula: String, addr: St
     let lands = acc._7
     let idx = lands.indexOf(landAssetId)
     if (!idx.isDefined()) then throw("Your staked lands don't contain " + landAssetId) else
+    let customKey = keyLandAssetIdToCustomName(landAssetId)
+    let customName = getString(customKey).valueOrElse("")
     (sizesOut, arts, continent, bpRes, 
     acc._5 :+ DeleteEntry(keyStakedTimeByAssetId(landAssetId))
     :+ DeleteEntry(keyStakedTimeByTypeAssetIdAndOwner(LANDPREFIX, landAssetId, addr))
     :+ DeleteEntry(keyLandToAssetId(landNum))
-    :+ DeleteEntry(keyNftName(landNum, landSize))
     :+ DeleteEntry(keyLandAssetIdToOwner(landAssetId))
     :+ DeleteEntry(keyInfraLevelByAssetId(landAssetId))
     :+ DeleteEntry(keyInfraLevelByAssetIdAndOwner(landAssetId, addr))
-    :+ DeleteEntry(keyPresaleArtActivatedByAssetId(landAssetId))
-    :+ DeleteEntry(keyPresaleArtActivatedByAssetIdAndOwner(landAssetId, addr))
     :+ DeleteEntry(keyLandArtStatusByTypeAndAssetId(ARTPRESALE, landAssetId))
     :+ DeleteEntry(keyLandArtStatusByTypeAssetIdAndOwner(ARTPRESALE, landAssetId, addr))
     :+ DeleteEntry(keyLandNumToOwner(landNum))
     :+ DeleteEntry(keyWarehouseByLand(landAssetId))
+    :+ DeleteEntry(customKey)
+    :+ DeleteEntry(keyLandCustomNameToAssetId(customName))
     :+ Burn(landAssetId.fromBase58String(), 1),
-    props, lands.removeByIndex(idx.value()))
+    props, lands.removeByIndex(idx.value()), acc._8 + pieces)
   }
 
   let bpKey = keyBackpackByDuck(duckAssetId)
@@ -689,23 +727,26 @@ func mergeInternal(newLandSize: String, newLevel: Int, formula: String, addr: St
   let landsKey = keyStakedLandsByOwner(addr)
   let landsStr = getString(landsKey)
   let landsIn = if (landsStr.isDefined()) then split_51C(landsStr.value(), "_") else []
-  let r = FOLD<5>(landAssetIds, (formula, 0, "", currentPack[bpIdxRes], [], propStr, landsIn), checkMerge)
-  # r = (ignored, totalArtValue, continent, resClaimed, actions, proportions)
+  let r = FOLD<5>(landAssetIds, (formula, 0, "", currentPack[bpIdxRes], [], propStr, landsIn, 0), checkMerge)
+  # r = (ignored, totalArtValue, continent, resClaimed, actions, proportions, stakedLandsByUser, stakedPiecesToRemove)
   # generate newLandSize land on the continent, with total artifacts value
   let continent = r._3
   let continentIdx = continents.indexOf(continent).valueOrErrorMessage("Unknown continent: " + continent)
   let terrains = genTerrains(txId.toBigInt().abs(), continentIdx)
   let freeNum = getInteger(keyNextFreeLandNum()).valueOrElse(PRESALENUMLANDS + 1)
   let newLandNum = freeNum.toString()
-  let issue = Issue(keyNftName(newLandNum, newLandSize), # name: LAND13S
+  let issue = Issue(nftName(newLandNum, newLandSize), # name: LAND13S
     makeString([newLandNum, newLandSize, terrains, continent], "_"), # description: "13_S_CEBBEFECCCFEEADECBDECEDBC_Asia"
     1, 0, false)
   let assetId = calculateAssetId(issue)
   let newLandAssetId = assetId.toBase58String()
   let newMat = makeString(subtractMaterials(needMat > 0, currentPack[bpIdxMat].split("_"), needMat), "_")
+  let piecesKey = keyStakedPiecesByOwner(addr)
+  let stakedPieces = getInteger(piecesKey).valueOrElse(0)
 
   (r._5 # destruct actions
   :+ (if (r._7.size() > 0) then StringEntry(landsKey, makeString_11C(r._7, "_")) else DeleteEntry(landsKey))
+  :+ IntegerEntry(piecesKey, if (stakedPieces < r._8) then 0 else stakedPieces - r._8)
   :+ IntegerEntry(keyNextFreeLandNum(), freeNum + 1)
   :+ issue
   :+ StringEntry(keyLandToAssetId(newLandNum), newLandAssetId)
@@ -727,29 +768,29 @@ func s2m(addr: String, landAssetIds: List[String], txId: ByteVector) = {
   mergeInternal("M", 3, "SSSS", addr, landAssetIds, txId, 0)
 }
 
-# 2*M4 + 1*S3 -> L4 (mat or usdn required for upgrade S3->S4)
+# 2*M4 + 1*S3 -> L4 (mat or usdt required for upgrade S3->S4)
 func m2l(addr: String, landAssetIds: List[String], txId: ByteVector, shouldUseMat: Boolean, paymentAmount: Int) = {
-  let cost = InfraUpgradeCostSUsdn * 4 # 1*4
+  let cost = InfraUpgradeCostSUsdt * 4 # 1*4
   if (!shouldUseMat && paymentAmount != cost) then throw("Payment attached should be " + cost.toString()) else
   mergeInternal("L", 4, "SMM", addr, landAssetIds, txId, InfraUpgradeCostS * 4)
 }
 
-# 1*L5 + 1*M4 + 3*S3 -> XL5 (mat or usdn required for upgrade M4->M5, 3*(S3->S5))
+# 1*L5 + 1*M4 + 3*S3 -> XL5 (mat or usdt required for upgrade M4->M5, 3*(S3->S5))
 func l2xl(addr: String, landAssetIds: List[String], txId: ByteVector, shouldUseMat: Boolean, paymentAmount: Int) = {
-  let cost = InfraUpgradeCostSUsdn * 47 # 4*5 + 3*(1*4+1*5)
+  let cost = InfraUpgradeCostSUsdt * 47 # 4*5 + 3*(1*4+1*5)
   if (!shouldUseMat && paymentAmount != cost) then throw("Payment attached should be " + cost.toString()) else
   mergeInternal("XL", 5, "SSSML", addr, landAssetIds, txId, InfraUpgradeCostS * 47)
 }
 
-# 1*XL6 + 1*L5 -> XXL6 (mat or usdn required for upgrade L5->L6)
+# 1*XL6 + 1*L5 -> XXL6 (mat or usdt required for upgrade L5->L6)
 func xl2xxl(addr: String, landAssetIds: List[String], txId: ByteVector, shouldUseMat: Boolean, paymentAmount: Int) = {
-  let cost = InfraUpgradeCostSUsdn * 54 # 9*6
+  let cost = InfraUpgradeCostSUsdt * 54 # 9*6
   if (!shouldUseMat && paymentAmount != cost) then throw("Payment attached should be " + cost.toString()) else
   mergeInternal("XXL", 6, "LXL", addr, landAssetIds, txId, InfraUpgradeCostS * 54)
 }
 
 # Only lands with the maximum level of infrastructure and located on the same continent can be merged. 
-# With the merge, the infrastructure moves to a new land, land artefact pieces (if any) are added up
+# With the merge, the infrastructure moves to a new land, land artifact pieces (if any) are added up
 # Size	Pieces	MaxInfraLevel	Formula to upgrade    Materials needed
 #  S	   1*25	   3	           -
 #  M	   4*25	   4	           4*S3                  -
@@ -768,7 +809,7 @@ func mergeCommon(shouldUseMat: Boolean, addr: String, paymentAmount: Int, landAs
 }
 
 func prolog(i: Invocation) = {
-  if (getBoolean(keyBlocked()).valueOrElse(false)) then throw("Contracts are under maintenance") else
+  if (i.originCaller != restContract && getBoolean(keyBlocked()).valueOrElse(false)) then throw("Contracts are under maintenance") else
   StringEntry(keyLastTxIdByUser(i.originCaller.toString()), i.transactionId.toBase58String())
 }
 
@@ -805,25 +846,34 @@ func stakeLand() = {
   if (isDefined(getInteger(timeKey))) then throw("NFT " + asset.name + " is already staked") else
   let d = asset.description.split("_") # ["445", "S", "BFBBFBDFBBEDDBDFEEBDBDBFF", "Africa"]
   let terrainCounts = countTerrains(d[recTerrains]) # [0, 10, 0, 6, 3, 6]
-  let props = updateProportions(terrainCounts, numPiecesBySize(d[recLandSize]) / SSIZE, 1)
-
-  let landsStr = getString(keyStakedLandsByOwner(address))
+  let pieces = numPiecesBySize(d[recLandSize])
+  let props = updateProportions(terrainCounts, pieces / SSIZE, 1)
+  let artPieces = getInteger(keyLandArtStatusByTypeAndAssetId(ARTPRESALE, landAssetId)).valueOrElse(0)
+  let landsKey = keyStakedLandsByOwner(address)
+  let landsStr = getString(landsKey)
   let lands = if (landsStr.isDefined()) then split_51C(landsStr.value(), "_") else []
   if (lands.containsElement(landAssetId)) then throw("Your staked lands already contain " + landAssetId) else
+  let infraLevel = getInteger(keyInfraLevelByAssetId(landAssetId)).valueOrElse(0)
+  let piecesKey = keyStakedPiecesByOwner(address)
+  let oldPieces = getInteger(piecesKey).valueOrElse(0)
+  let wlgResult = wlgContract.invoke("onStakeLand", [address], []).asInt()
 
-  [IntegerEntry(timeKey, lastBlock.timestamp),
+  ([IntegerEntry(timeKey, lastBlock.timestamp),
     IntegerEntry(keyStakedTimeByTypeAssetIdAndOwner(LANDPREFIX, landAssetId, address), lastBlock.timestamp),
-    StringEntry(keyStakedLandsByOwner(address), makeString_11C(lands :+ landAssetId, "_")),
+    StringEntry(landsKey, makeString_11C(lands :+ landAssetId, "_")),
+    IntegerEntry(piecesKey, oldPieces + pieces),
     StringEntry(keyLandAssetIdToOwner(landAssetId), address),
     StringEntry(keyLandNumToOwner(landNum), address),
+    IntegerEntry(keyLandArtStatusByTypeAssetIdAndOwner(ARTPRESALE, landAssetId, address), artPieces),
+    IntegerEntry(keyInfraLevelByAssetIdAndOwner(landAssetId, address), infraLevel),
     StringEntry(keyResProportions(), props), 
-    prologAction]
+    prologAction], wlgResult)
 }
 
 @Callable(i)
 func unstakeLand(landAssetIdIn: String) = {
   let prologAction = prolog(i)
-  if (i.payments.size() != 0) then throw("unstake doesn't require any payments") else
+  if (i.payments.size() != 0) then throw("No payments required") else
   let addr = i.caller.toString()
   let c = checkClaimConditions(addr, claimModeDuck, landAssetIdIn)
   let landAssetId = c._2
@@ -839,15 +889,20 @@ func unstakeLand(landAssetIdIn: String) = {
   let t = blockInfoByHeight(height).value().timestamp
   let releaseTime = govContract.getInteger(keyUserGwlReleaseTime(addr)).valueOrElse(0)
   if (t <= releaseTime) then throw("Your gWL are taking part in voting, cannot unstake until " + releaseTime.toString()) else
+  let piecesKey = keyStakedPiecesByOwner(addr)
+  let stakedPieces = getInteger(piecesKey).valueOrElse(0)
+  let newPieces = if (stakedPieces < pieces) then 0 else stakedPieces - pieces
+  let wlgResult = wlgContract.invoke("onUnstakeLand", [addr], []).asInt()
 
-  [ScriptTransfer(i.caller, 1, landAssetId.fromBase58String()),
+  ([ScriptTransfer(i.caller, 1, landAssetId.fromBase58String()),
     DeleteEntry(keyStakedTimeByAssetId(landAssetId)),
     DeleteEntry(keyStakedTimeByTypeAssetIdAndOwner(LANDPREFIX, landAssetId, addr)),
     StringEntry(keyResProportions(), props),
     StringEntry(claimResult._2, makeString(claimResult._3, ":")),
     if (lands.size() > 1) then StringEntry(landsKey, makeString_11C(lands.removeByIndex(idx.value()), "_")) else DeleteEntry(landsKey),
+    IntegerEntry(piecesKey, newPieces),
     prologAction
-  ]
+  ], wlgResult)
 }
 
 @Callable(i)
@@ -869,6 +924,9 @@ func stakeDuck() = {
   let location = getString(locKey)
   let bpKey = keyBackpackByDuck(assetIdStr)
   let backpack = getString(bpKey)
+  let keyHealth = keyDuckHealth(assetIdStr)
+  let maxHP = maxHealth(getInteger(keyDuckLevel(assetIdStr)).valueOrElse(0))
+  let curHealth = getInteger(keyHealth).valueOrElse(maxHP)
 
   [IntegerEntry(timeKey, lastBlock.timestamp),
     IntegerEntry(keyStakedTimeByTypeAssetIdAndOwner(DUCKPREFIX, assetId.toBase58String(), address), lastBlock.timestamp),
@@ -876,27 +934,26 @@ func stakeDuck() = {
     StringEntry(keyStakedDuckByOwner(address), assetIdStr)]
     ++ if (location.isDefined()) then [] else [StringEntry(locKey, DEFAULTLOCATION)]
     ++ if (backpack.isDefined()) then [] else [StringEntry(bpKey, "0:0_0_0_0_0_0:0_0_0_0_0_0:")]
-    :+ IntegerEntry(keyDuckHealth(assetIdStr), 100)
+    :+ IntegerEntry(keyHealth, curHealth)
     :+ prologAction
 }
 
 @Callable(i)
 func unstakeDuck(assetIdStr: String) = {
   let prologAction = prolog(i)
-  if (i.payments.size() != 0) then throw("unstake doesn't require any payments") else
+  if (i.payments.size() != 0) then throw("No payments required") else
   let assetId = assetIdStr.fromBase58String()
   let address = i.caller.toString()
   let asset = assetInfo(assetId).value()
-  # if (asset.issuer != incubatorAddr && asset.issuer != breederAddr) then throw("Unknown issuer of " + DUCKPREFIX + " token") else
-  # if (!asset.name.contains(DUCKPREFIX)) then throw("Only NFT " + DUCKPREFIX + " tokens can be unstaked") else
   let timeKey = keyStakedTimeByAssetId(assetId.toBase58String())
-  if (!isDefined(timeKey)) then throw("NFT " + asset.name + " is not staked") else
-  if (!isDefined(keyStakedDuckByOwner(address))) then throw("The duck " + asset.name + " is not staked") else
+  if (!isDefined(getInteger(timeKey))) then throw("NFT " + asset.name + " is not staked") else
+  if (!isDefined(getString(keyStakedDuckByOwner(address)))) then throw("The duck " + asset.name + " is not staked") else
   let owner = getString(keyDuckIdToOwner(assetId.toBase58String())).valueOrErrorMessage("NFT " + asset.name + " is orphaned")
   if (owner != address) then throw("Staked NFT is not yours") else
   let keyHealth = keyDuckHealth(assetIdStr)
-  let health = getInteger(keyHealth).valueOrElse(100)
-  if (health != 100) then throw("Please heal your duck before unstaking") else 
+  let maxHP = maxHealth(getInteger(keyDuckLevel(assetIdStr)).valueOrElse(0))
+  let health = getInteger(keyHealth).valueOrElse(maxHP)
+  if (health < maxHP) then throw("Please heal your duck to " + maxHP.toString() + "hp before unstaking") else 
 
   [ScriptTransfer(i.caller, 1, assetId),
     DeleteEntry(timeKey),
@@ -914,10 +971,13 @@ func unstakeDuck(assetIdStr: String) = {
 @Callable(i)
 func claimRes(amount: Int, landAssetIdStr: String) = {
   let prologAction = prolog(i)
-  if (i.payments.size() != 0) then throw("claimRes doesn't require any payments") else
+  if (i.payments.size() != 0) then throw("No payments required") else
   let addr = i.originCaller.toString()
   let result = claimResInternal(addr, amount, claimModeDuck, landAssetIdStr) # (actions, bpKey, backpackList, whKey, warehouseList)
+  let duckAssetId = getString(keyStakedDuckByOwner(addr)).valueOrErrorMessage("You don't have a duck staked")
+
   (result._1
+  ++ updateDuckStatsInternal(duckAssetId, fraction(xpClaim, amount, MULT8))._1
   :+ StringEntry(result._2, makeString(result._3, ":")) # bpKey, backpackList
   :+ StringEntry(result._4, makeString(result._5, ":")) # whKey, warehouseList
   :+ prologAction,
@@ -930,178 +990,213 @@ func claimRes(amount: Int, landAssetIdStr: String) = {
 @Callable(i)
 func claimResToWH(amount: Int, landAssetIdStr: String) = {
   let prologAction = prolog(i)
-  if (i.payments.size() != 0) then throw("claimRes doesn't require any payments") else
+  if (i.payments.size() != 0) then throw("No payments required") else
   let addr = i.originCaller.toString()
   let result = claimResInternal(addr, amount, claimModeWh, landAssetIdStr) # (actions, bpKey, backpackList, whKey, warehouseList)
   (result._1
+  ++ updateAccStatsInternal(addr, fraction(xpClaim, amount, MULT8))._1
   :+ StringEntry(result._2, makeString(result._3, ":")) # bpKey, backpackList
   :+ StringEntry(result._4, makeString(result._5, ":")) # whKey, warehouseList
   :+ prologAction,
     result._5[whIdxRes])
 }
 
-# Health|Mission|  Obstcales   |         Winds           |  Path  |  Timestamp  ;              newLocation                 : timestamp
-#  80_50|0,4_4,0|B3,3_B4,3_T2,1|WWSSESEWEEWNNESEEWSSEESNS|NNEEEENN|1670074470199;${continent}_${locationType}_${locationId}:1670074470199
+# if $, then transfer 50% of activitiesUsdt (from rest SC)
+# Health|Mission|  Obstacles   |         Winds           |   Path   |  Timestamp  |  Bonus  |ProdUsed;              newLocation                 : lastTxId  : 2=thorus
+# 100_80|0,0_4,4|B2,3_B1,4_A2,0|EEEEEEEEEEEEEEEEEEEEEEEEE|EEEESSWSSE|1684513140554|$ or XXhp|5,1_12,2;${continent}_${locationType}_${locationId}:${lastTxId}:${version}
 @Callable(i)
 func flight(message: ByteVector, sig: ByteVector) = {
   let prologAction = prolog(i)
-  if (!sigVerify_8Kb(message, sig, pub)) then throw("signature does not match") else
-  if (i.payments.size() != 0) then throw("flight doesn't require any payments") else
-  let parts = message.toUtf8String().split(";")
-  let hp = parts[0].split("|")[0].split("_")
-  let curHP = hp[0].parseIntValue()
-  let newHP = hp[1].parseIntValue()
-  let newLocAndTime = parts[1].split(":")
-  let newLocation = newLocAndTime[0]
-  let time = newLocAndTime[1].parseIntValue()
-  if ((time > lastBlock.timestamp + FIVEMINUTESMILLIS) ||
-    (time < lastBlock.timestamp - FIVEMINUTESMILLIS)) then throw("signature outdated") else
-  let duckAssetId = getString(keyStakedDuckByOwner(i.caller.toString())).valueOrErrorMessage("You don't have a duck staked")
-  let keyHealth = keyDuckHealth(duckAssetId)
-  let oldFromState = getInteger(keyHealth).valueOrElse(100)
-  if (oldFromState != curHP) then throw("oldHealth=" + getInteger(keyHealth).valueOrElse(100).toString() + " from state does not match one from flight log=" + curHP.toString()) else
-  if (curHP <= 0) then throw("You can't fly with zero health") else
+  if (i.payments.size() != 0) then throw("No payments required") else
+  let userAddr = i.caller.toString()
+  let f = flightCommon(userAddr, message, sig) # (newHP, duckAssetId, sentAmount, newLocation, prodUsed)
+  let duckAssetId = f._2
+
   let locKey = keyDuckLocation(duckAssetId)
   let curLocation = getString(locKey).valueOrElse(DEFAULTLOCATION)
-  if (newLocation == curLocation) then throw("You can't fly to the same location") else
-  # todo: if health < 100, we should decrease backpack capacity proportionally
-  ([StringEntry(locKey, if (newHP > 0) then newLocation else curLocation),
-    IntegerEntry(keyHealth, newHP),
-    prologAction], unit)
-}
-
-# temporary duck healing while we don't have artifacts
-@Callable(i)
-func setHealth(health: Int, duckAssetId: String) = {
-  let prologAction = prolog(i)
-  if (health < 0 || health > 100) then throw("HP should be within 0..100") else
-
-  [IntegerEntry(keyDuckHealth(duckAssetId), health), prologAction]
-}
-
-# matType: index of material from backpack to spend on healing ${Fuel}_${Metal}_${Plank}_${Glass}_${Plastic}_${Protein}
-# 1_000_000 of materials heal from 0 to 100%
-@Callable(i)
-func heal(matType: Int, amount: Int) = {
-  let prologAction = prolog(i)
-  if (matType < 0 || matType >= NUMRES) then throw("Unknown material: " + matType.toString()) else
-  if (amount <= 0) then throw("Amount should be positive! " + amount.toString()) else
-  let duckAssetId = getString(keyStakedDuckByOwner(i.caller.toString())).valueOrErrorMessage("You don't have a duck staked")
-  let keyHealth = keyDuckHealth(duckAssetId)
-  let oldHealth = getInteger(keyHealth).valueOrElse(100)
-  if (oldHealth >= 100) then throw("HP should be < 100 to heal") else
+  if (f._4 == curLocation) then throw("You can't fly to the same location") else
   let bpKey = keyBackpackByDuck(duckAssetId)
   let currentPack = getBackpack(bpKey)
-  let mList = currentPack[bpIdxMat].split("_")
-  let currentAmount = mList[matType].parseIntValue()
-  let deltaHealth = min([amount / HEALCOST, 100 - oldHealth])
-  let spendAmount = deltaHealth * HEALCOST
-  if (currentAmount < spendAmount) then throw("You need " + spendAmount.toString() + " of " + matTypes[matType] + 
-    " to heal, but you backpack contains " + currentAmount.toString()) else
-  let newMat = subOneInList(mList, matType, spendAmount)
+  let newProd = subtractProducts(currentPack[bpIdxProd], f._5)
+  # todo: if health < 100, we should decrease backpack capacity proportionally
 
-  [IntegerEntry(keyHealth, oldHealth + deltaHealth),
-    StringEntry(bpKey, makeString([currentPack[bpIdxLevel], currentPack[bpIdxRes], newMat, currentPack[bpIdxProd]], ":")),
+  ([StringEntry(locKey, if (f._1 > 0) then f._4 else curLocation),
+    StringEntry(bpKey, makeString([currentPack[bpIdxLevel], currentPack[bpIdxRes], currentPack[bpIdxMat], newProd], ":")),
+    IntegerEntry(keyDuckHealth(duckAssetId), f._1),
     prologAction]
+    ++ updateDuckStatsInternal(duckAssetId, if (f._1 > 0) then xpSuccessFlight else xpFailFlight)._1, 
+      f._3)
+}
+
+@Callable(i)
+func heal(quantityL1: Int, quantityL2: Int, quantityL3: Int) = {
+  let prologAction = prolog(i)
+  if (quantityL1 < 0 || quantityL2 < 0 || quantityL3 < 0) then throw("Quantity cannot be negative") else
+  let duckAssetId = getString(keyStakedDuckByOwner(i.caller.toString())).valueOrErrorMessage("You don't have a duck staked")
+  let qts = [quantityL1, quantityL2, quantityL3]
+  let keyHealth = keyDuckHealth(duckAssetId)
+  let maxHP = maxHealth(getInteger(keyDuckLevel(duckAssetId)).valueOrElse(0))
+  let oldHealth = getInteger(keyHealth).valueOrElse(maxHP)
+  if (oldHealth >= maxHP) then throw("HP should be < " + maxHP.toString() + " to heal") else
+  let bpKey = keyBackpackByDuck(duckAssetId)
+  let currentPack = getBackpack(bpKey)
+  let prodList = if (currentPack[bpIdxProd] == "") then [] else currentPack[bpIdxProd].split("_")
+
+  func iterateProd(acc: (List[String], Int, Int), ignoredItem: String) = {
+    let n = acc._2 # counter of products in backpack, < productionMatrix.size()
+    let x = if (n < prodList.size()) then prodList[n].parseIntValue() else 0
+    if (n < 3) then { # medkits
+      let q = qts[n]
+      if (x < q) then throw("You have only " + x.toString() + " of " + prodTypes[n]) else
+      (acc._1 :+ toString(x - q), n + 1, acc._3 + medKitHp[n] * q)
+    } else {
+      (acc._1 :+ toString(x), n + 1, acc._3)
+    }
+  }
+  let result = (FOLD<50>(productionMatrix, ([], 0, 0), iterateProd))
+  let newHealth = min([maxHP, oldHealth + result._3])
+  ([IntegerEntry(keyHealth, newHealth),
+    StringEntry(bpKey, makeString_2C([currentPack[bpIdxLevel], currentPack[bpIdxRes], currentPack[bpIdxMat], makeString(result._1, "_")], ":")),
+    prologAction]
+  ++ updateDuckStatsInternal(duckAssetId, xpHeal * (quantityL1 + quantityL2 + quantityL3))._1, 
+    newHealth)
+}
+
+@Callable(i)
+func healES() = {
+  let prologAction = prolog(i)
+  if (i.payments.size() != 1) then throw("Exactly one payment required") else
+  let pmt = i.payments[0].value()
+  if (pmt.assetId != usdtAssetId) then throw("Allowed USDT payment only!") else
+  let duckAssetId = getString(keyStakedDuckByOwner(i.caller.toString())).valueOrErrorMessage("You don't have a duck staked")
+  let keyHealth = keyDuckHealth(duckAssetId)
+  let maxHP = maxHealth(getInteger(keyDuckLevel(duckAssetId)).valueOrElse(0))
+  let oldHealth = getInteger(keyHealth).valueOrElse(maxHP)
+  if (oldHealth > 0) then throw("HP should be 0 to call Emergency Service") else
+  let bpKey = keyBackpackByDuck(duckAssetId)
+  let currentPack = getBackpack(bpKey)
+  let prodList = if (currentPack[bpIdxProd] == "") then [] else currentPack[bpIdxProd].split("_")
+  let medKitAmount1 = if (prodList.size() > 0) then prodList[0].parseIntValue() else 0
+  let medKitAmount2 = if (prodList.size() > 1) then prodList[1].parseIntValue() else 0
+  let medKitAmount3 = if (prodList.size() > 2) then prodList[2].parseIntValue() else 0
+  if (medKitAmount1 > 0 || medKitAmount2 > 0 || medKitAmount3 > 0) then throw("You have to use own Medical Kit") else
+  let existStr = economyContract.getString(keyEsWarehouse())
+  let existAmounts = if (existStr.isDefined()) then existStr.value().split("_") else []
+  let existAmount = if (size(existAmounts) > 0) then existAmounts[0].parseIntValue() else 0
+  if (existAmount <= 0) then throw("There are no Medical Kits L1 at Emergency Service storage") else
+  let newHealth = oldHealth + medKitHp[0]
+  let newES = makeString(cons(toString(existAmount - 1), existAmounts.removeByIndex(0)), "_")
+  let recipe = productionMatrix[0].split("_")
+  let totalMat = getRecipeMaterials(recipe)
+  let packSize = recipe[recipeIdxPacksize].parseIntValue()
+  let sellPrice = fraction(totalMat * ESSELLCOEF, RESOURCEPRICEMIN, 10 * packSize)
+  if (pmt.amount != sellPrice) then throw("Payment attached should be " + sellPrice.toString()) else
+  let result = economyContract.invoke("updateEsStorage", [newES], [AttachedPayment(usdtAssetId, sellPrice)]).asString()
+
+  ([IntegerEntry(keyHealth, newHealth), prologAction]
+  ++ updateDuckStatsInternal(duckAssetId, xpCallES)._1, 
+    result)
 }
 
 # callback for economy contract
 @Callable(i)
 func updateBackpack(duckAssetId: String, newPack: String) = {
-  let prologAction = prolog(i)
   if (i.caller != economyContract) then throw("permission denied") else
 
-  ([StringEntry(keyBackpackByDuck(duckAssetId), newPack),
-    prologAction], newPack)
+  ([StringEntry(keyBackpackByDuck(duckAssetId), newPack)], newPack)
 }
 
+# todo: split by commit-reveal
 @Callable(i)
 func buySLand() = {
+ #  if (i.caller != this) then throw("Permission denied") else
   let prologAction = prolog(i)
   if (i.payments.size() != 1) then throw("Exactly one payment required") else
   let pmt = i.payments[0].value()
-  if (pmt.assetId != usdnAssetId) then throw("Allowed USDN payment only!") else
-  if (pmt.amount != EXPUSDN) then throw("Payment attached should be " + EXPUSDN.toString()) else
+  if (pmt.assetId != usdtAssetId) then throw("Allowed USDT payment only!") else
+  if (pmt.amount != EXPUSDT) then throw("Payment attached should be " + EXPUSDT.toString()) else
   let result = expeditionInternal(i.caller, i.transactionId)
   (result._1 
-  :+ ScriptTransfer(economyContract, pmt.amount, usdnAssetId) 
+  :+ ScriptTransfer(economyContract, pmt.amount, usdtAssetId) 
+  ++ updateAccStatsInternal(i.caller.toString(), xpNewSLand)._1
   :+ prologAction, result._2._1)
 }
 
-# Health|Mission|  Obstcales   |         Winds           |  Path  |  Timestamp  ;newLocation: timestamp
-#  80_50|0,4_4,0|B3,3_B4,3_T2,1|WWSSESEWEEWNNESEEWSSEESNS|NNEEEENN|1670074470199;?_E_?:1670074470199
-@Callable(i)
-func expeditionBuy(message: ByteVector, sig: ByteVector) = {
-  let prologAction = prolog(i)
-  if (i.payments.size() != 1) then throw("Exactly one payment required") else
-  let pmt = i.payments[0].value()
-  if (pmt.assetId != usdnAssetId) then throw("Allowed USDN payment only!") else
-  if (pmt.amount != EXPUSDN) then throw("Payment attached should be " + EXPUSDN.toString()) else
-  let result = expeditionCommon(false, i.caller, i.transactionId, message, sig)
-  if (result._2 == "") then result else
-  (result._1 
-  :+ ScriptTransfer(economyContract, pmt.amount, usdnAssetId) 
-  :+ prologAction, result._2)
-}
-
-# Health|Mission|  Obstcales   |         Winds           |  Path  |  Timestamp  ;newLocation: timestamp
-#  80_50|0,4_4,0|B3,3_B4,3_T2,1|WWSSESEWEEWNNESEEWSSEESNS|NNEEEENN|1670074470199;?_E_?:1670074470199
+# todo: split by commit-reveal
+# todo: extract common part with flight
+#  Health|Mission|       Obstcales        |         Winds           |  Path  |  Timestamp  |Bonus ;newLocation: lastTxId : version
+# 240_240|6,6_0,0|K3,1_A0,1_F0,5_C1,4_T5,5|WWWWWWWWWWWWWWWWWWWWWWWWW|NNEENWWW|1685994541854|20hp;?_E_?:4NVYtGU1DgdxZVn6fUEbbq34VLZzSdi8nRnzWUoKuHQj:3
 @Callable(i)
 func expedition(message: ByteVector, sig: ByteVector) = {
   let prologAction = prolog(i)
-  if (i.payments.size() != 0) then throw("expedition doesn't require any payments") else
-  let result = expeditionCommon(true, i.caller, i.transactionId, message, sig)
-  (result._1 :+ prologAction, result._2)
+  if (i.payments.size() != 0) then throw("No payments required") else
+  let result = expeditionCommon(i.caller, i.transactionId, message, sig) # (actions, landAssetId, prizeAmount)
+  let duckAssetId = getString(keyStakedDuckByOwner(i.caller.toString())).valueOrErrorMessage("You don't have a duck staked")
+  (result._1 
+  ++ updateDuckStatsInternal(duckAssetId, xpNewSLand)._1
+  :+ prologAction, (result._2, result._3))
 }
 
+# from duck (todo: allow upgrade from warehouse)
 @Callable(i)
 func upgradeInfra(landAssetId: String) = {
   let prologAction = prolog(i)
-  if (i.payments.size() != 0) then throw("Infrastructure upgrade doesn't require any payments") else
-  let result = upInfraCommon(true, i.caller, 0, landAssetId)
-  (result._1 :+ prologAction, result._2)
+  if (i.payments.size() != 0) then throw("No payments required") else
+  let result = upInfraCommon(true, i.caller, 0, landAssetId) # (actions, newLevel, matUsed)
+  let duckAssetId = getString(keyStakedDuckByOwner(i.caller.toString())).valueOrErrorMessage("You don't have a duck staked")
+  (result._1 :+ prologAction
+  ++ updateDuckStatsInternal(duckAssetId, fraction(xpUpgradeInfra, result._3, MULT8))._1, 
+    result._2)
 }
 
+# todo: remove it
 @Callable(i)
-func upgradeInfraUsdn(landAssetId: String) = {
+func upgradeInfraUsdt(landAssetId: String) = {
+  if (i.caller != this) then throw("Permission denied") else
   let prologAction = prolog(i)
   if (i.payments.size() != 1) then throw("Exactly one payment required") else
   let pmt = i.payments[0].value()
-  if (pmt.assetId != usdnAssetId) then throw("Allowed USDN payment only!") else
-  let result = upInfraCommon(false, i.caller, pmt.amount, landAssetId)
+  if (pmt.assetId != usdtAssetId) then throw("Allowed USDT payment only!") else
+  let result = upInfraCommon(false, i.caller, pmt.amount, landAssetId) # (actions, newLevel, matUsed)
   (result._1 
-  :+ ScriptTransfer(economyContract, pmt.amount, usdnAssetId) 
+  :+ ScriptTransfer(economyContract, pmt.amount, usdtAssetId) 
   :+ prologAction, result._2)
 }
 
 @Callable(i)
-func activateArtifact(artName: String, landAssetId: String) = {
+func activateArtifact(artName: String, landAssetIdOpt: String) = {
   let prologAction = prolog(i)
-  if (i.payments.size() != 0) then throw("Artifact activation doesn't require any payments") else
+  if (i.payments.size() != 0) then throw("No payments required") else
+  let addr = i.caller.toString()
   let result = match(artName) {
-    case "PRESALE" => activatePresaleArt(i.caller.toString(), landAssetId)
+    case "PRESALE" => activatePresaleArt(addr, landAssetIdOpt)
+    case "ONBOARD" => activateOnboardArt(addr)
     case _ => throw("Unknown artifact")
   }
   result :+ prologAction
 }
 
+# todo: split by commit-reveal
 @Callable(i)
 func mergeLands(landAssetIds: List[String]) = {
   let prologAction = prolog(i)
-  if (i.payments.size() != 0) then throw("Lands merging doesn't require any payments") else
+  if (i.payments.size() != 0) then throw("No payments required") else
   let result = mergeCommon(true, i.caller.toString(), 0, landAssetIds, i.transactionId)
-  (result._1 :+ prologAction, result._2)
+  (result._1 :+ prologAction
+  ++ updateAccStatsInternal(i.caller.toString(), xpMerge)._1, 
+    result._2)
 }
 
+# todo: split by commit-reveal
 @Callable(i)
-func mergeLandsUsdn(landAssetIds: List[String]) = {
+func mergeLandsUsdt(landAssetIds: List[String]) = {
   let prologAction = prolog(i)
   if (i.payments.size() != 1) then throw("Exactly one payment required") else
   let pmt = i.payments[0].value()
-  if (pmt.assetId != usdnAssetId) then throw("Allowed USDN payment only!") else
+  if (pmt.assetId != usdtAssetId) then throw("Allowed USDT payment only!") else
   let result = mergeCommon(false, i.caller.toString(), pmt.amount, landAssetIds, i.transactionId)
   (result._1 
-  :+ ScriptTransfer(economyContract, pmt.amount, usdnAssetId)
+  :+ ScriptTransfer(economyContract, pmt.amount, usdtAssetId)
   :+ prologAction, result._2)
 }
 
@@ -1111,11 +1206,13 @@ func mergeLandsUsdn(landAssetIds: List[String]) = {
 # '-' means direction from warehouse to backpack, '+' - from backpack to warehouse
 @Callable(i)
 func cargoExchange(cargoListStr: String, landAssetId: String) = {
+  let prologAction = prolog(i)
+  if (i.payments.size() != 0) then throw("No payments required") else
   let cargoParts = split_4C(cargoListStr, ":")
   let addr = i.originCaller.toString()
   let asset = assetInfo(landAssetId.fromBase58String()).value()
   let timeKey = keyStakedTimeByAssetId(landAssetId)
-  if (!isDefined(timeKey)) then throw(asset.name + " is not staked") else
+  if (!isDefined(getInteger(timeKey))) then throw(asset.name + " is not staked") else
   let owner = getString(keyLandAssetIdToOwner(landAssetId)).valueOrErrorMessage("NFT " + asset.name + " is orphaned")
   if (owner != addr) then throw(LANDPREFIX + " is not yours") else
   let landIndex = numPiecesBySize(asset.description.split("_")[recLandSize]) / SSIZE
@@ -1128,14 +1225,180 @@ func cargoExchange(cargoListStr: String, landAssetId: String) = {
   if (loc[locIdxId] != landAssetId) then throw("Duck should be on the land " + landAssetId) else
 
   let whKey = keyWarehouseByLand(landAssetId)
-  let currentWh = getWarehouse(whKey, landIndex, infraLevel) # list of 4 strings
+  let currentWh = getWarehouse(whKey, landIndex, infraLevel) # list of 5 strings: [volPrefix, resListStr, matListStr, prodListStr, LOFT]
   let bpKey = keyBackpackByDuck(duckAssetId)
-  let currentPack = getBackpack(bpKey)
+  let currentPack = getBackpack(bpKey) # list of 4 strings: [level, resListStr, matListStr, prodListStr]
 
-  let result = moveStuff(cargoParts, currentWh, currentPack) # (whRes, whMat, whProd, bpRes, bpMat, bpProd)
+  let result = moveStuff(cargoParts, currentWh, currentPack) # (whRes, whMat, whProd, bpRes, bpMat, bpProd, volSaldo)
+  let loft = currentWh[whIdxLOFT].split("_")
+  let loftO = loft[volOccupied].parseIntValue() + result._7
+  let loftF = loft[volFree].parseIntValue() - result._7
+  [StringEntry(bpKey, makeString_2C([currentPack[bpIdxLevel], result._4, result._5, result._6], ":")),
+    StringEntry(whKey, makeString_2C([currentWh[whIdxLevels], result._1, result._2, result._3, 
+      makeString([loft[volLocked], toString(loftO), toString(loftF), loft[volTotal]], "_")], ":")),
+    prologAction]
+}
 
-  [StringEntry(bpKey, makeString([currentPack[bpIdxLevel], result._4, result._5, result._6], ":")),
-    StringEntry(whKey, makeString([currentWh[whIdxVol], result._1, result._2, result._3], ":"))]
+# callback for economics contract
+@Callable(i)
+func saveWarehouse(whStr: String, landAssetId: String) = {
+  if (i.caller != economyContract) then throw("Access denied") else
+  let whKey = keyWarehouseByLand(landAssetId)
+  let wh = split_4C(whStr, ":") # list of 5 strings: [volPrefix, resListStr, matListStr, prodListStr, LOFT]
+  if (wh.size() != 5) then throw("warehouse string should contain 4 ':' separators") else
+  let loftL = wh[whIdxLOFT].split("_")[volLocked]
+  let loftO = getWarehouseOccupiedVol(wh)
+  let loftT = getWarehouseTotalVolume(wh[whIdxLevels])
+  let loftF = loftT - loftL.parseIntValue() - loftO
+  let newWhStr = makeString_2C([wh[whIdxLevels], wh[whIdxRes], wh[whIdxMat], wh[whIdxProd], 
+    makeString([loftL, loftO.toString(), loftF.toString(), loftT.toString()], "_")], ":")
+  ([StringEntry(whKey, newWhStr)], newWhStr)
+}
+
+# callback for rest
+@Callable(i)
+func fixWarehouseFormat(landAssetId: String) = {
+  if (i.caller != restContract) then throw("Access denied") else
+  let whKey = keyWarehouseByLand(landAssetId)
+  let asset = assetInfo(landAssetId.fromBase58String()).value()
+  let landIndex = numPiecesBySize(asset.description.split("_")[recLandSize]) / SSIZE
+  let infraLevel = getInteger(keyInfraLevelByAssetId(landAssetId)).valueOrElse(0)
+  let wh = getWarehouse(whKey, landIndex, infraLevel)
+  let loftL = economyContract.invoke("recalcLockedVolumeREADONLY", [landAssetId, wh], []).asInt()
+  let loftO = getWarehouseOccupiedVol(wh)
+  let loftT = getWarehouseTotalVolume(wh[whIdxLevels])
+  let loftF = loftT - loftL - loftO
+  let newWhStr = makeString_2C([wh[whIdxLevels], wh[whIdxRes], wh[whIdxMat], wh[whIdxProd], 
+    makeString([loftL.toString(), loftO.toString(), loftF.toString(), loftT.toString()], "_")], ":")
+  ([StringEntry(whKey, newWhStr)], newWhStr)
+}
+
+# callback for rest
+@Callable(i)
+func fixStakedPieces(address: String) = {
+  if (i.caller != restContract) then throw("Access denied") else
+  let stakedPieces = if (address == "") then 0 else {
+    let landsStr = stakingContract.getString(keyStakedLandsByOwner(address))
+    let lands = if (landsStr.isDefined()) then split_51C(landsStr.value(), "_") else []
+
+    func oneLand(acc: Int, landAssetId: String) = {
+      let asset = assetInfo(landAssetId.fromBase58String()).value()
+      let landSize = asset.description.split("_")[recLandSize]
+      acc + numPiecesBySize(landSize)
+    }
+    FOLD<100>(lands, 0, oneLand)
+  }
+  ([IntegerEntry(keyStakedPiecesByOwner(address), stakedPieces)], stakedPieces)
+}
+
+# entity type to rename: "ACCOUNT", "LAND", "DUCK"
+@Callable(i)
+func setCustomName(assetId: String, customName: String, type: String) = {
+  # if (i.caller != this) then throw("Permission denied") else
+  let prologAction = prolog(i)
+  if (i.payments.size() != 1) then throw("Exactly one payment required") else
+  let pmt = i.payments[0].value()
+  if (pmt.assetId != usdtAssetId) then throw("Allowed USDT payment only!") else
+  if (pmt.amount != RENAMINGCOST) then throw("Payment should be " + RENAMINGCOST.toString()) else
+  if (customName.contains("__")) then throw("Name should not contain '__': " + customName) else
+  if (customName.size() > MAXNAMELEN) then throw("Name too long, maxLength=" + MAXNAMELEN.toString()) else
+  let addr = i.originCaller.toString()
+  let actions = match(type) {
+      case "ACCOUNT" => {
+        let reverseKey = keyCustomNameToAddress(customName)
+        let nameOwner = getString(reverseKey)
+        if (nameOwner.isDefined()) then throw("Name already registered: " + customName) else
+        let addrToNameKey = keyAddressToCustomName(addr)
+        let oldName = getString(addrToNameKey)
+        let freeOld = if (oldName.isDefined()) then [DeleteEntry(keyCustomNameToAddress(oldName.value()))] else []
+        freeOld :+ StringEntry(addrToNameKey, customName) :+ StringEntry(reverseKey, addr)
+        ++ updateAccStatsInternal(addr, xpCustomName)._1
+      }
+      case "LAND" => {
+        let asset = assetInfo(assetId.fromBase58String()).value()
+        let timeKey = keyStakedTimeByAssetId(assetId)
+        if (!isDefined(getInteger(timeKey))) then throw(asset.name + " is not staked") else
+        let owner = getString(keyLandAssetIdToOwner(assetId)).valueOrErrorMessage("NFT " + asset.name + " is orphaned")
+        if (owner != addr) then throw(LANDPREFIX + " is not yours") else
+        let reverseKey = keyLandCustomNameToAssetId(customName)
+        let nameOwner = getString(reverseKey)
+        if (nameOwner.isDefined()) then throw("Name already registered: " + customName) else
+        let assetToNameKey = keyLandAssetIdToCustomName(assetId)
+        let oldName = getString(assetToNameKey)
+        let freeOld = if (oldName.isDefined()) then [DeleteEntry(keyLandCustomNameToAssetId(oldName.value()))] else []
+        freeOld :+ StringEntry(assetToNameKey, customName) :+ StringEntry(reverseKey, assetId)
+        ++ updateAccStatsInternal(addr, xpCustomName)._1
+      }
+      case "DUCK" => {
+        let asset = assetInfo(assetId.fromBase58String()).value()
+        let timeKey = keyStakedTimeByAssetId(assetId)
+        if (!isDefined(getInteger(timeKey)) || !isDefined(getString(keyStakedDuckByOwner(addr)))) then throw(asset.name + " is not staked") else
+        let owner = getString(keyDuckIdToOwner(assetId)).valueOrErrorMessage("NFT " + asset.name + " is orphaned")
+        if (owner != addr) then throw(DUCKPREFIX + " is not yours") else
+        let reverseKey = keyDuckCustomNameToAssetId(customName)
+        let nameOwner = getString(reverseKey)
+        if (nameOwner.isDefined()) then throw("Name already registered: " + customName) else
+        let assetToNameKey = keyDuckAssetIdToCustomName(assetId)
+        let oldName = getString(assetToNameKey)
+        let freeOld = if (oldName.isDefined()) then [DeleteEntry(keyDuckCustomNameToAssetId(oldName.value()))] else []
+        freeOld :+ StringEntry(assetToNameKey, customName) :+ StringEntry(reverseKey, assetId)
+        ++ updateDuckStatsInternal(assetId, xpCustomName)._1
+      }
+      case _ => throw("Unknown entity type")
+    }
+  (actions :+ ScriptTransfer(economyContract, pmt.amount, usdtAssetId) :+ prologAction, 0)
+}
+
+@Callable(i)
+func setReferrals(oldPlayer: String, newPlayer: String) = {
+  if (i.callerPublicKey != pub) then throw("Permission denied") else
+  let prologAction = prolog(i)
+  if (i.payments.size() != 0) then throw("No payments required") else
+  if (!addressFromString(oldPlayer).isDefined()) then throw("Invalid address: " + oldPlayer) else
+  if (!addressFromString(newPlayer).isDefined()) then throw("Invalid address: " + newPlayer) else
+  let oldsKey = keyOldies()
+  let olds = getString(oldsKey)
+  let oldies = if (olds.isDefined()) then split_4C(olds.value(), "_") else []
+  if (oldies.containsElement(newPlayer)) then throw(newPlayer + " is not newbie (already has referrals)") else
+  let refByKey = keyAddressRefBy(newPlayer)
+  let refBy = getString(refByKey)
+  if (refBy.isDefined() && refBy.value().addressFromString().isDefined()) then throw(newPlayer + " already has refBy: " + refBy.value()) else
+  let refsKey = keyAddressReferrals(oldPlayer)
+  let refs = getString(refsKey)
+  let refsArray = if (refs.isDefined()) then split_4C(refs.value(), "_") else []
+  if (refsArray.containsElement(newPlayer)) then throw(oldPlayer + " already contains " + newPlayer + " within referrals") else
+  let newRefs = makeString_2C(refsArray :+ newPlayer, "_")
+  let newOlds = if (oldies.containsElement(oldPlayer)) then olds.value() else makeString_2C(oldies :+ oldPlayer, "_")
+  # setting refByKey also means ONBOARD artifact
+  ([StringEntry(refByKey, oldPlayer), StringEntry(refsKey, newRefs), StringEntry(oldsKey, newOlds), prologAction], 0)
+}
+
+@Callable(i)
+func distributePoints(strength: Int, accuracy: Int, intellect: Int, endurance: Int, dexterity: Int) = {
+  let prologAction = prolog(i)
+  if (i.payments.size() != 0) then throw("No payments required") else
+  let addr = i.originCaller.toString()
+  let duckAssetId = getString(keyStakedDuckByOwner(addr)).valueOrErrorMessage("You don't have a duck staked")
+  let freeKeyAcc = keyUserFreePoints(addr)
+  let freePointsAcc = stakingContract.getInteger(freeKeyAcc).valueOrElse(0)
+  let freeKeyDuck = keyDuckFreePoints(duckAssetId)
+  let freePointsDuck = stakingContract.getInteger(freeKeyDuck).valueOrElse(0)
+  let sumFree = freePointsAcc + freePointsDuck
+  let sumToDistribute = strength + accuracy + intellect + endurance + dexterity
+  if (sumToDistribute > sumFree) then throw("There are only " + sumFree.toString() + " free points to distribute") else
+  let charsKey = keyDuckChars(duckAssetId)
+  let chars = stakingContract.getString(charsKey).valueOrElse("0_0_0_0_0").split("_")
+  let newAcc = freePointsAcc - sumToDistribute
+
+  ([IntegerEntry(freeKeyAcc, if (newAcc < 0) then 0 else newAcc),
+    IntegerEntry(freeKeyDuck, if (newAcc < 0) then freePointsDuck + newAcc else freePointsDuck),
+    StringEntry(charsKey, makeString([
+      toString(chars[charStrength].parseIntValue() + strength),
+      toString(chars[charAccuracy].parseIntValue() + accuracy),
+      toString(chars[charIntellect].parseIntValue() + intellect),
+      toString(chars[charEndurance].parseIntValue() + endurance),
+      toString(chars[charDexterity].parseIntValue() + dexterity)], "_")),
+    prologAction], 0)
 }
 
 @Callable(i)
@@ -1163,5 +1426,39 @@ func getWarehouseREADONLY(landAssetId: String) = {
   let asset = assetInfo(landAssetId.fromBase58String()).value()
   let landIndex = numPiecesBySize(asset.description.split("_")[recLandSize]) / SSIZE
   let infraLevel = getInteger(keyInfraLevelByAssetId(landAssetId)).valueOrElse(0)
-  ([], getWarehouse(keyWarehouseByLand(landAssetId), landIndex, infraLevel).makeString(":"))
+  ([], makeString_2C(getWarehouse(keyWarehouseByLand(landAssetId), landIndex, infraLevel), ":"))
 }
+
+# callback for wl-gold contract
+@Callable(i)
+func saveLastTx() = {
+  if (i.caller != wlgContract && i.caller != economyContract) then throw("Access denied") else
+  ([prolog(i)], 42)
+}
+
+# callback for economics contract
+@Callable(i)
+func updateDuckStats(duckAssetId: String, deltaXP: Int) = {
+  if (i.caller != economyContract) then throw("Access denied") else
+  updateDuckStatsInternal(duckAssetId, deltaXP)
+}
+
+# callback for economics contract
+@Callable(i)
+func updateAccStats(addr: String, deltaXP: Int) = {
+  if (i.caller != economyContract) then throw("Access denied") else
+  updateAccStatsInternal(addr, deltaXP)
+}
+
+# @Callable(i)
+# func issueDucks() = {
+#   if ((i.caller != this)) then throw("Permission denied") else 
+
+#   func duckIssuer(acc: List[Issue], elem: String) = {
+#     let issue = Issue(elem, "{\"genotype\": \" + elem + \", \"crossbreeding\": true}", 1, 0, false)
+#     (acc :+ issue)
+#   }
+
+#   let actions = FOLD<12>(testDucks, [], duckIssuer)
+#   (actions, unit)      
+# }

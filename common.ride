@@ -1,0 +1,158 @@
+{-# STDLIB_VERSION 6 #-}
+{-# SCRIPT_TYPE ACCOUNT #-}
+{-# CONTENT_TYPE LIBRARY #-}
+
+let chain = this.bytes.drop(1).take(1)
+let usdtAssetId = match(chain) {
+  case base16'57' => base58'9wc3LXNA4TEBsXyKtoLE9mrbDD7WMHXvXrCjZvabLAsi'
+  case base16'54' => base58'6mWwf9mZBjVgkC54idpyaZLQfAosD914wT8fGf2iiY63'
+  case _ => throw("Unknown chain")
+}
+let defaultRestAddressStr = match(chain) {
+  case base16'57' => "3PQCuvFbvh4LkPUnrnU1z3jnbA1p9m3WNhv"
+  case base16'54' => "3MumkGGztCKAXpWDqxkddofqXSUbqQkvSJy"
+  case _ => throw("Unknown chain")
+}
+let InfraUpgradeCostS = match(chain) {
+  case base16'57' => 100_0000_0000 # (was 63.07198406) * L materials need to upgrade S land from (L-1) to L level
+  case base16'54' => 1_0000_0000 # /100 for testnet
+  case _ => throw("Unknown chain")
+}
+let arbitrageDelay = match(chain) {
+  case base16'57' => 600000 # 10*60*1000 = 10 minutes
+  case base16'54' => 60000 # 1 minute for testnet
+  case _ => throw("Unknown chain")
+}
+
+let SEP = "__"
+let MULT6 = 1_000_000
+let MULT7 = 10_000_000 # recipe materials are 1 decimal, but we need 8, so it is converting coeff
+let MULT8 = 1_0000_0000
+let MULT10 = 100_0000_0000
+let SSIZE = 25
+let MSIZE = 100
+let LSIZE = 225
+let XLSIZE = 400
+let XXLSIZE = 625
+let MINSHOPPAYMENT = 100000 # $0.1
+
+func getStringOrFail(address: Address, key: String) = address.getString(key)
+    .valueOrErrorMessage(makeString(["mandatory ", address.toString(), ".", key, " is not defined"], ""))
+func getIntOrElse(key: String, defaultVal: Int) = this.getInteger(key).valueOrElse(defaultVal)
+
+# data indices from restConfig (index 0 is descriptor %s%s..)
+let IdxCfgStakingDapp    = 1
+let IdxCfgEconomyDapp    = 2
+let IdxCfgGovernanceDapp = 3
+let IdxCfgWlgDapp        = 4
+let IdxCfgPuzzlePoolDapp = 5
+
+func keyRestCfg() = "%s__restConfig"
+func keyRestAddress() = "%s__restAddr"
+
+func readRestCfgOrFail(rest: Address) = split_4C(rest.getStringOrFail(keyRestCfg()), SEP)
+func getContractAddressOrFail(restCfg: List[String], idx: Int) = restCfg[idx].addressFromString()
+  .valueOrErrorMessage("Rest cfg doesn't contain address at index " + idx.toString())
+
+# GLOBAL VARIABLES
+let restContract = this.getString(keyRestAddress()).valueOrElse(defaultRestAddressStr).addressFromStringValue()
+let restCfg = restContract.readRestCfgOrFail()
+let stakingContract = restCfg.getContractAddressOrFail(IdxCfgStakingDapp)
+let economyContract = restCfg.getContractAddressOrFail(IdxCfgEconomyDapp)
+let govContract = restCfg.getContractAddressOrFail(IdxCfgGovernanceDapp)
+let wlgContract = restCfg.getContractAddressOrFail(IdxCfgWlgDapp)
+let puzzlePoolContract = restCfg.getContractAddressOrFail(IdxCfgPuzzlePoolDapp)
+
+let recLandNum = 0
+let recLandSize = 1
+let recTerrains = 2
+let recContinent = 3
+
+func keyResProportions() = "resTypesProportions"
+func keyStakedLandsByOwner(ownerAddr: String) = "stakedLandsByOwner_" + ownerAddr
+let wlgIssuedAmountKey = "wlg_issuedAmount"
+let wlgAssetIdKey = "wlg_assetId"
+let wlgAssetId = wlgContract.getBinary(wlgAssetIdKey).valueOrErrorMessage("Not initialized yet")
+
+let idxWlgAmount = 0
+let idxWlgPrice = 1
+let idxWlgFunds = 2
+let idxWlgEconomy = 3
+let idxWlgActivity = 4
+let idxWlgArbitrage = 5
+let idxWlgPool = 6
+
+func asString(v: Any) = {
+  match v {
+    case s: String => s
+    case _ => throw("fail to cast into String")
+  }
+}
+func asInt(v: Any) = {
+  match v {
+    case n: Int => n
+    case _ => throw("fail to cast into Int")
+  }
+}
+func asAnyList(v: Any) = {
+  match v {
+    case l: List[Any] => l
+    case _ => throw("fail to cast into List[Any]")
+  }
+}
+func asBoolean(v: Any) = {
+  match v {
+    case s: Boolean => s
+    case _ => throw("fail to cast into Boolean")
+  }
+}
+func numPiecesBySize(landSize: String) = {
+  match (landSize) {
+    case "S" => SSIZE
+    case "M" => MSIZE
+    case "L" => LSIZE
+    case "XL" => XLSIZE
+    case "XXL" => XXLSIZE
+    case _ => throw("Unknown land size")
+  }
+}
+
+# get staked land pieces [total, user]
+# todo: now we have keyStakedPiecesByOwner, so refactor it after fixing actual data
+func getVotingPower(userAddrStrOrEmpty: String) = {
+  let props = stakingContract.getString(keyResProportions()).valueOrElse("0_0_0_0_0_0").split("_")
+  
+  func adder(acc: Int, item: String) = acc + item.parseIntValue()
+  
+  let totalPower = FOLD<6>(props, 0, adder)
+
+  let usersPower = if (userAddrStrOrEmpty == "") then 0 else {
+    let landsStr = stakingContract.getString(keyStakedLandsByOwner(userAddrStrOrEmpty))
+    let lands = if (landsStr.isDefined()) then split_51C(landsStr.value(), "_") else []
+
+    func oneLand(acc: Int, landAssetId: String) = {
+      let asset = assetInfo(landAssetId.fromBase58String()).value()
+      let landSize = asset.description.split("_")[recLandSize]
+      acc + numPiecesBySize(landSize)
+    }
+    FOLD<100>(lands, 0, oneLand)
+  }
+
+  [totalPower, usersPower]
+}
+
+func getWlgStats() = {
+  let issuedAmount = wlgContract.getInteger(wlgIssuedAmountKey).valueOrErrorMessage("WLGOLD is not issued yet")
+  let economyUsd = assetBalance(economyContract, usdtAssetId)
+  let restUsd = assetBalance(restContract, usdtAssetId)
+  let wlgUsd = assetBalance(wlgContract, usdtAssetId)
+  let puzzleUsd = assetBalance(puzzlePoolContract, usdtAssetId)
+  let totalFundsUsd = economyUsd + restUsd + wlgUsd #+ puzzleUsd
+  [issuedAmount, fraction(totalFundsUsd, MULT8, issuedAmount), totalFundsUsd, economyUsd, restUsd, wlgUsd, puzzleUsd]
+}
+
+# print integer as fixed point string
+func fixedPoint(val: Int, decimals: Int) = {
+  let tenPow = pow(10, 0, decimals, 0, 0, DOWN)
+  toString(val / tenPow) + "." + toString(val % tenPow)
+}

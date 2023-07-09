@@ -1,0 +1,217 @@
+{-# STDLIB_VERSION 6 #-}
+{-# CONTENT_TYPE DAPP #-}
+{-# SCRIPT_TYPE ACCOUNT #-}
+{-# IMPORT common.ride,landlib.ride,rpglib.ride #-}
+
+let MILLION6 = 1000000_0000_0000 # 1 mil WLG tokens
+let MARKETINGSHARE = 100000 # 10% 6 decimals
+let TEAMSHARE = 200000 # 20% 6 decimals
+let ACTIVITYSHARE = 100000 # 10% 6 decimals
+let PLAYERSHARE = 400000 # 40% 6 decimals
+let YEARMILLIS = 31557600000 # 365.25*24*3600*1000
+let WEEKMILLIS = 604800000 # 7*24*3600*1000
+let MAXPERIOD = 156 # 52 weeks * 3 years
+let A6 = 100_000000 # 100.0
+let B8 = 5000_0000 # 0.5
+let wlgIssueTimeKey = "wlg_issueTime"
+let marketingAddrKey = "marketingAddr"
+let teamAddrKey = "teamAddr"
+let profitAddrKey = "profitAddr"
+let lastMarketingTimeKey = "lastClaimedTime_marketing"
+let marketingAmountLeftKey = "marketingAmountLeft"
+let lastTeamTimeKey = "lastClaimedTime_team"
+let teamAmountLeftKey = "teamAmountLeft"
+let lastActivitiesTimeKey = "lastClaimedTime_activities"
+let actAmountLeftKey = "activitiesAmountLeft"
+func keyLastClaimedTimeByUser(addr: String) = "lastClaimedTimeUser_" + addr
+func keyLastArbTimeByUser(addr: String) = "lastArbTimeUser_" + addr
+let stakersAmountLeftKey = "stakersAmountLeft"
+let stakersAmountPaidTotalKey = "stakersAmountPaidTotal"
+func keyStakersAmountPaidUser(addr: String) = "stakersAmountPaidUser_" + addr
+
+func prolog() = {
+  if (stakingContract.getBoolean(keyBlocked()).valueOrElse(false)) then throw("Contracts are under maintenance") else
+  stakingContract.invoke("saveLastTx", [], []).asInt()
+}
+
+func getSwapLimit(addr: String) = {
+  let lastTime = getInteger(keyLastArbTimeByUser(addr)).valueOrElse(0)
+  let now = lastBlock.timestamp
+  if (now - lastTime < arbitrageDelay) then throw("Arbitrages are possible once a " + toString(arbitrageDelay / 60000) + "min") else
+  let pieces = getVotingPower(addr)[IdxEffUser]
+  # limitInUSD = a * pieces^b
+  let pow8 = pow(pieces, 0, B8, 8, 8, CEILING)
+  fraction(A6, pow8, MULT8)
+}
+
+# 1 mil WLGOLD distribution:
+# 10% - DAO investors (instantly) => manual transfer 100000 WLGOLD to DAO wallet
+# 10% - market making (instantly) => manual transfer 100000 WLGOLD to market making wallet
+# 10% - marketing (during 1 year evenly) => claim to marketing wallet
+# 20% - team (during 3 years evenly) => claim to team wallet
+# 10% - game activities (during 3 years evenly) => claim to activities wallet
+# 40% - staked lands (during 3 years progressively) => claim to caller's wallet according to share
+# We assume, that in 3 years totalPieces will grow from current value to at least 100000 and the growth will be linear
+# Lets split 3 years by 156 week intervals,
+# each of them will have distribution amount proportional to current totalPieces (currentPeriodDistribution)
+# amountToClaim = currentPeriodDistribution * piecesShare * temporalShare
+# Such a scheme will be used first 1.5 years, and after gathering statistics - refined to final 1.5 years period
+func claimInternal(addr: String) = {
+  let caller = addr.addressFromStringValue()
+  let now = lastBlock.timestamp
+  let issueTime = getInteger(wlgIssueTimeKey).valueOrErrorMessage("Not initialized")
+
+  let marketingTotal = fraction(MILLION6, MARKETINGSHARE, MULT6)
+  let marketingAmountLeft = getInteger(marketingAmountLeftKey).valueOrElse(marketingTotal)
+  let lastMarketingTime = getInteger(lastMarketingTimeKey).valueOrElse(issueTime)
+  let marketingAddr = getString(marketingAddrKey).value().addressFromStringValue()
+  let marketingAmount = min([fraction(marketingTotal, now - lastMarketingTime, YEARMILLIS), marketingAmountLeft])
+
+  let teamTotal = fraction(MILLION6, TEAMSHARE, MULT6)
+  let teamAmountLeft = getInteger(teamAmountLeftKey).valueOrElse(teamTotal)
+  let lastTeamTime = getInteger(lastTeamTimeKey).valueOrElse(issueTime)
+  let teamAddr = getString(teamAddrKey).value().addressFromStringValue()
+  let teamAmount = min([fraction(teamTotal, now - lastTeamTime, 3 * YEARMILLIS), teamAmountLeft])
+
+  let actTotal = fraction(MILLION6, ACTIVITYSHARE, MULT6)
+  let actAmountLeft = getInteger(actAmountLeftKey).valueOrElse(actTotal)
+  let lastActivitiesTime = getInteger(lastActivitiesTimeKey).valueOrElse(issueTime)
+  let actAmount = min([fraction(actTotal, now - lastActivitiesTime, 3 * YEARMILLIS), actAmountLeft])
+
+  let curPeriod = (now - issueTime) / WEEKMILLIS
+  if (curPeriod > MAXPERIOD / 2) then throw("Please modify contract for next 1.5 years, according to stats") else
+  let eff = getVotingPower(addr)
+  let totalPieces = eff[IdxEffTotal]
+  let amountLeftTotal = getInteger(stakersAmountLeftKey).valueOrElse(0)
+  let curPeriodDistribution = fraction(amountLeftTotal, 2 * totalPieces, (totalPieces + max([100000, totalPieces]) * (MAXPERIOD - curPeriod)))
+  let userTimeKey = keyLastClaimedTimeByUser(addr)
+  let lastUserTime = getInteger(userTimeKey).valueOrElse(issueTime)
+  let userAmount = fraction(fraction(curPeriodDistribution, eff[IdxEffUser], totalPieces), now - lastUserTime, 3 * YEARMILLIS)
+  let userKey = keyStakersAmountPaidUser(addr)
+  ([ScriptTransfer(marketingAddr, marketingAmount, wlgAssetId),
+    ScriptTransfer(teamAddr, teamAmount, wlgAssetId),
+    ScriptTransfer(restContract, actAmount, wlgAssetId),
+    ScriptTransfer(caller, userAmount, wlgAssetId),
+    IntegerEntry(userKey, getInteger(userKey).valueOrElse(0) + userAmount),
+    IntegerEntry(stakersAmountPaidTotalKey, getInteger(stakersAmountPaidTotalKey).valueOrElse(0) + userAmount),
+    IntegerEntry(stakersAmountLeftKey, amountLeftTotal - userAmount),
+    IntegerEntry(marketingAmountLeftKey, marketingAmountLeft - marketingAmount),
+    IntegerEntry(lastMarketingTimeKey, now),
+    IntegerEntry(teamAmountLeftKey, teamAmountLeft - teamAmount),
+    IntegerEntry(lastTeamTimeKey, now),
+    IntegerEntry(actAmountLeftKey, actAmountLeft - actAmount),
+    IntegerEntry(lastActivitiesTimeKey, now),
+    IntegerEntry(userTimeKey, now)
+  ], userAmount)
+}
+
+# need to place 5k USDT initially
+@Callable(i)
+func constructorV1(restAddr: String, marketingAddr: String, teamAddr: String, profitAddr: String) = {
+  if (i.caller != this) then throw("Permission denied") else
+  if (getBinary(wlgAssetIdKey).isDefined()) then throw("Already initialized") else
+  let issuedAmount = MILLION6
+  let issue = Issue("WLGOLD", "WavesLands Gold investment token", issuedAmount, 8, true, unit, 0)
+  let assetId = issue.calculateAssetId()
+  [
+    issue,
+    IntegerEntry(wlgIssueTimeKey, lastBlock.timestamp),
+    IntegerEntry(wlgIssuedAmountKey, issuedAmount),
+    IntegerEntry(stakersAmountPaidTotalKey, 0),
+    IntegerEntry(stakersAmountLeftKey, fraction(MILLION6, PLAYERSHARE, MULT6)), # 1 mil WLGOLD
+    BinaryEntry(wlgAssetIdKey, assetId),
+    StringEntry(keyRestAddress(), restAddr),
+    StringEntry(marketingAddrKey, marketingAddr),
+    StringEntry(teamAddrKey, teamAddr),
+    StringEntry(profitAddrKey, profitAddr)
+  ]
+}
+
+# pair is WLGOLD/USDT, so WLGOLD is amount asset, USDT is price asset
+# need to reissue some WLGOLD to keep price the same
+@Callable(i)
+func buyWlg(minAmount: Int) = {
+#  if (i.caller != this) then throw("Permission denied") else
+  let prologResult = prolog()
+  if (i.payments.size() != 1) then throw("exactly 1 payment must be attached") else
+  let pmt = i.payments[0]
+  let usdtAmt = pmt.amount
+  let pmtAssetId = pmt.assetId.valueOrErrorMessage("WAVES can't be used as payment")
+  if (pmtAssetId != usdtAssetId) then throw("USDT payments only!") else
+  let caller = i.caller
+  let addr = caller.toString()
+  let maxUsdt = getSwapLimit(addr)
+  if (usdtAmt > maxUsdt) then throw("You can spend max " + maxUsdt.fixedPoint(6) + " USDT") else
+  if (usdtAmt < MINSHOPPAYMENT) then throw("You can trade min " + MINSHOPPAYMENT.fixedPoint(6) + " USDT") else
+  let curStats = getWlgStats()
+  let curWlgAmount = curStats[idxWlgAmount]
+  let oldFundsUsd = curStats[idxWlgFunds] - usdtAmt
+  # we can't use price from stats as payment already added to balance
+  let wlgPrice = fraction(oldFundsUsd, MULT8, curWlgAmount)
+  let buyPrice = fraction(wlgPrice, 6, 5) # +20%
+  let wlgAmount = fraction(usdtAmt, MULT8, buyPrice)
+  if (wlgAmount < minAmount) then throw("Price changed during operation, please try again") else
+  let profitAmount = usdtAmt / 6
+  let deltaFunds = usdtAmt - profitAmount
+  let reissued = fraction(curWlgAmount, deltaFunds, oldFundsUsd)
+  ([Reissue(wlgAssetId, reissued, true),
+    IntegerEntry(wlgIssuedAmountKey, curWlgAmount + reissued),
+    IntegerEntry(keyLastArbTimeByUser(addr), lastBlock.timestamp),
+    ScriptTransfer(getString(profitAddrKey).value().addressFromStringValue(), profitAmount, usdtAssetId),
+    ScriptTransfer(caller, wlgAmount, wlgAssetId)
+  ], prologResult)
+}
+
+# need to burn some WLGOLD to keep price the same
+@Callable(i)
+func sellWlg(minAmount: Int) = {
+#  if (i.caller != this) then throw("Permission denied") else
+  let prologResult = prolog()
+  if (i.payments.size() != 1) then throw("exactly 1 payment must be attached") else
+  let pmt = i.payments[0]
+  let wlgAmt = pmt.amount
+  let pmtAssetId = pmt.assetId.valueOrErrorMessage("WAVES can't be used as payment")
+  if (pmtAssetId != wlgAssetId) then throw("WLGOLD payments only!") else
+  let caller = i.caller
+  let addr = caller.toString()
+  let maxUsdt = getSwapLimit(addr)
+  let curStats = getWlgStats()
+  let curWlgAmount = curStats[idxWlgAmount]
+  let sellPrice = fraction(curStats[idxWlgPrice], 4, 5) # -20%
+  let usdtAmt = fraction(wlgAmt, sellPrice, MULT8)
+  if (usdtAmt > maxUsdt) then throw("You can get max " + maxUsdt.fixedPoint(6) + " USDT") else
+  if (usdtAmt < MINSHOPPAYMENT) then throw("You can trade min " + MINSHOPPAYMENT.fixedPoint(6) + " USDT") else
+  if (usdtAmt < minAmount) then throw("Price changed during operation, please try again") else
+  let profitAmount = usdtAmt / 4
+  let burned = fraction(usdtAmt + profitAmount, curWlgAmount, curStats[idxWlgFunds])
+  ([
+    Burn(wlgAssetId, burned),
+    IntegerEntry(wlgIssuedAmountKey, curWlgAmount - burned),
+    IntegerEntry(keyLastArbTimeByUser(addr), lastBlock.timestamp),
+    ScriptTransfer(getString(profitAddrKey).value().addressFromStringValue(), profitAmount, usdtAssetId),
+    ScriptTransfer(caller, usdtAmt, usdtAssetId)
+  ], prologResult)
+}
+
+@Callable(i)
+func claim() = {
+#  if (i.caller != this) then throw("Permission denied") else
+  let prologResult = prolog()
+  let actions = claimInternal(i.caller.toString())._1
+  (actions, prologResult)
+}
+
+# callback for staking contract
+@Callable(i)
+func onStakeLand(addr: String) = {
+  if (i.caller != stakingContract) then throw("Permission denied") else
+  claimInternal(addr)
+}
+
+# callback for staking contract
+# only call for user's last land unstaked
+@Callable(i)
+func onUnstakeLand(addr: String) = {
+  if (i.caller != stakingContract) then throw("Permission denied") else
+  claimInternal(addr)
+}

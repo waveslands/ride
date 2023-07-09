@@ -1,0 +1,131 @@
+{-# STDLIB_VERSION 6 #-}
+{-# SCRIPT_TYPE ACCOUNT #-}
+{-# CONTENT_TYPE LIBRARY #-}
+
+let LANDPREFIX = "LAND"
+let DUCKPREFIX = "DUCK"
+let ARTPRESALE = "PRESALE"
+let ARTONBOARD = "ONBOARD"
+let NUMRES = 6
+let DAILYRESBYPIECE = 345_6000 # 0.03456000 (base value)
+let DAYMILLIS = 86_400_000 # 24*60*60*1000
+let WHMULTIPLIER = 100_0000_0000
+let DEFAULTLOCATION = "Africa_F_Africa"
+let RESOURCEPRICEMIN = 39637 # (was 158549): 0.03456000 * 25 * 0.039637 * 365 = 12.5 USDT (5% APR)
+let ESMAXPACKAGES = 3
+let ESBUYCOEF = 4
+let ESSELLCOEF = 10
+let resTypes = ["Oil", "Ore", "Wood", "Sand", "Clay", "Organic"]
+let matTypes = ["Fuel", "Metal", "Plank", "Glass", "Plastic", "Protein"]
+let prodTypes = [
+  "First Aid Kit L1", "First Aid Kit L2", "First Aid Kit L3", 
+  "Backpack L1", "Backpack L2", "Backpack L3", 
+  "Food Ration L1", "Food Ration L2", "Food Ration L3", 
+  "Jet Pack L1", "Jet Pack L2", "Jet Pack L3", 
+  "Shield L1", "Shield L2", "Shield L3"]
+let continents = ["Americas", "Europe", "Asia", "Africa", "Oceania"]
+let productionMatrix = [ # up to 250 recipes (50 per continent); fuel, metal, plank, glass, plastic, protein - 1 decimal, weight=1 decimal, package int
+  # Americas
+  "1_1_1_2_2_5_1_10_0", # 0 Аптечка1, Восстанавливает 30 hp => 1.2 materials to craft
+  "2_2_2_4_4_10_1_10_0", # 1 Аптечка2, 60 hp => 2.4 mat
+  "3_3_3_6_6_15_1_10_0", # 2 Аптечка3, 120 hp => 3.6 mat
+  # Europe
+  "2_5_5_2_7_5_2_100_1", # 3 Рюкзак1, Увеличивает кол-во переносимого груза (5) => 2.6 mat
+  "4_10_10_4_14_10_2_100_1", # 4 Рюкзак2, (10) => 5.2 mat
+  "6_15_15_6_21_15_2_100_1", # 5 Рюкзак3, (20) => 7.8 mat
+  # Asia
+  "1_1_1_1_1_8_1_10_2", # 6 Рацион1, Увеличивает показатели (+2) ко всем параметрам персонажа на 24h => 1.3 mat
+  "2_2_2_2_2_16_1_10_2", # 7 Рацион2, (+4) => 2.6 mat
+  "3_3_3_3_3_24_1_10_2", # 8 Рацион3, (+8) => 3.9 mat
+  # Africa
+  "9_9_1_5_5_1_5_100_3", # 9 Ракетный ранец1, Уменьшает шанс столкновения с воздушными препятствиями (30%) => 3.0 mat
+  "18_18_2_10_10_2_5_100_3", # 10 Ракетный ранец2, (50%) => 6.0 mat
+  "27_27_3_15_15_3_5_100_3", # 11 Ракетный ранец3, (70%) => 9.0 mat
+  # Oceania
+  "2_2_1_2_2_2_1_10_4", # 12 Силовое поле1, Уменьшает кол-во урона (30 hp) => 1.1 mat
+  "4_4_2_4_4_4_1_10_4", # 13 Силовое поле2, (50 hp) => 2.2 mat
+  "6_6_3_6_6_6_1_10_4" # 14 Силовое поле3, (70 hp) => 3.3 mat
+]
+
+let contIdxAmericas = 0
+let contIdxEurope = 1
+let contIdxAsia = 2
+let contIdxAfrica = 3
+let contIdxOceania = 4
+
+let recipeIdxFuel = 0
+let recipeIdxMetal = 1
+let recipeIdxPlank = 2
+let recipeIdxGlass = 3
+let recipeIdxPlastic = 4
+let recipeIdxProtein = 5
+let recipeIdxWeight = 6
+let recipeIdxPacksize = 7
+let recipeIdxContinent = 8
+
+# warehouse groups:
+let whIdxLevels = 0 # warehouse volume (3 * (infaLevel + 1) * landIndex)
+let whIdxRes = 1 # resList
+let whIdxMat = 2 # matList
+let whIdxProd = 3 # prodList
+let whIdxLOFT = 4 # warehouse locked_occupied_free_total volume
+
+# warehouse volume groups:
+let volLocked = 0
+let volOccupied = 1
+let volFree = 2
+let volTotal = 3
+
+# backpack groups:
+let bpIdxLevel = 0 # upgradeLevel
+let bpIdxRes = 1 # resList
+let bpIdxMat = 2 # matList
+let bpIdxProd = 3 # prodList
+
+func getPkgSize(prodIdx: Int) = {
+  productionMatrix[prodIdx].split("_")[recipeIdxPacksize].parseIntValue()
+}
+
+func keyLastTxIdByUser(addr: String) = "lastTxIdByUser_" + addr
+func keyLandAssetIdToOwner(assetId: String) = "nftOwner_" + assetId
+func keyLandAssetIdToCustomName(assetId: String) = "landCustomNameByAssetId_" + assetId
+func keyStakedTimeByAssetId(assetId: String) = "stakedTime_" + assetId # both land and duck assets
+func keyInfraLevelByAssetId(assetId: String) = "infraLevel_" + assetId
+func keyLandArtStatusByTypeAndAssetId(type: String, assetId: String) = makeString(["landArtStatus", type, assetId], "_")
+func keyStakedTimeByTypeAssetIdAndOwner(nftType: String, assetId: String, ownerAddr: String) =
+    "stakedTimeByTypeAssetIdAndOwner_" + nftType + "_" + assetId + "_" + ownerAddr # both land and duck assets
+func keyWarehouseByLand(landAssetId: String) = "wareHouse_" + landAssetId
+func keyStakedPiecesByOwner(ownerAddr: String) = "stakedPiecesByOwner_" + ownerAddr
+func keyDuckAssetIdToCustomName(assetId: String) = "duckCustomNameByAssetId_" + assetId
+func keyAddressToCustomName(addr: String) = "accountCustomNameByAddr_" + addr
+func keyAddressRefBy(addr: String) = "accRefBy_" + addr # if present, then addr has/had ONBOARD artifact
+func keyOnboardArtActivatedOnDuck(duckAssetId: String) = "onboardArtActivatedOnDuck_" + duckAssetId # if present, then ONBOARD artifact is activated on duckAssetId by address (value)
+func keyOnboardArtDuckActivatedBy(addr: String) = "onboardArtActivatedDuckBy_" + addr # if present, then ONBOARD artifact is activated by addr on duckAssetId (value)
+func keyAddressReferrals(addr: String) = "accReferrals_" + addr
+func keyDuckIdToOwner(assetId: String) = "duckOwner_" + assetId
+func keyStakedDuckByOwner(ownerAddr: String) = "stakedDuckByOwner_" + ownerAddr
+func keyBackpackByDuck(duckAssetId: String) = "backPack_" + duckAssetId
+func keyDuckLocation(duckAssetId: String) = "duckLocation_" + duckAssetId # continent_locType_id
+func keyDuckHealth(duckAssetId: String) = "duckHealth_" + duckAssetId
+func keyBlocked() = "contractsBlocked"
+# governance keys
+func keyUserGwlReleaseTime(userAddr: String) = "%s%s__userGwlReleaseTime__" + userAddr
+func keyOrderByLand(landAssetId: String) = "landOrder_" + landAssetId
+# economics contract
+func keyEsWarehouse() = "emergencyWarehouseProducts"
+
+let locIdxContinent = 0
+# L|F|M|A
+let locIdxType = 1
+let locIdxId = 2
+
+# data indices to access effective gWL array
+let IdxEffTotal = 0
+let IdxEffUser  = 1
+
+func getRecipeMaterials(recipe: List[String]) = {
+  func addMat(ac: Int, j: Int) = {
+    ac + recipe[j].parseIntValue()
+  }
+  FOLD<6>([0, 1, 2, 3, 4, 5], 0, addMat)
+}

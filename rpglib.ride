@@ -1,0 +1,77 @@
+{-# STDLIB_VERSION 6 #-}
+{-# SCRIPT_TYPE ACCOUNT #-}
+{-# CONTENT_TYPE LIBRARY #-}
+
+let SCALE8 = 1_0000_0000
+let xpLevelScale = 3200 # 0.32 (4 decimals)
+let xpLevelRecipScale = 3_1250 # 3.125 (4 decimals)
+let xpLevelPow = 2_5000 # 2.5 (4 decimals)
+let xpLevelRecipPow = 4000 # 0.4 (4 decimals)
+let DEFAULTHP = 100
+let strengthToHpBase = 1_0391 # 1.0391 (4 decimals)
+let numPointsOnLevelUp = 3
+
+let charStrength = 0
+let charAccuracy = 1
+let charIntellect = 2
+let charEndurance = 3
+let charDexterity = 4
+
+func keyDuckChars(duckAssetId: String) = "duckChars_" + duckAssetId
+func keyDuckXP(duckAssetId: String) = "duckXP_" + duckAssetId
+func keyDuckLevel(duckAssetId: String) = "duckLevel_" + duckAssetId
+func keyDuckFreePoints(duckAssetId: String) = "duckFreePoints_" + duckAssetId
+func keyUserXP(addr: String) = "userXP_" + addr
+func keyUserLevel(addr: String) = "userLevel_" + addr
+func keyUserFreePoints(addr: String) = "userFreePoints_" + addr
+
+let xpClaim = 10_0000 # Claim с земли   1 ед. ресурса  10   утке или аккаунту
+
+# Перелет
+let xpSuccessFlight = 5_0000 # Успешный  1 шт  5    утке
+let xpFailFlight = 1_0000 # Неуспешный  1 шт  1    утке
+
+# Сделка
+#   Фабрика
+let xpTrade = 10_0000 # покупка/продажа/конвертация  1 ед. ресурса 10   утке
+
+#   Мануфактура 
+let xpCraft = 10_0000 # крафт 1 ед. материала  10   утке
+
+#   Служба спасения
+let xpSellToEs = 10_0000 # продажа  1 ед. материала  10   утке
+
+let xpCallES = 10_0000 # вызов 1 вызов  10   утке
+
+#   Магазин
+let xpShop = 10_0000 # покупка/продажа  1 ед. рес/мат/товара   10   аккаунту и утке
+
+# Переименование
+let xpCustomName = 500_0000 # Компания/Земля/Утка  1 шт  500  аккаунту или утке
+
+# Земли
+let xpNewSLand = 5000_0000 # Экспедиция за материалы/Покупка за USDT   1 S   5000 утке/аккаунту
+let xpUpgradeInfra = 10_0000 # Upgrade Infra  1 ед. материала  10   утке (или аккаунту, если разрешить апгрейд со склада)
+let xpMerge = 1000_0000 # Merge  1 шт   1000 аккаунту
+
+let xpOnboard = 1000_0000 # Приход по реферальной ссылке 1 шт 1000 аккаунту в виде ONBOARD артефакта, его можно применить на данной утке однократно
+
+let xpHeal = 1_0000 # Самолечение 1 аптечка любого уровня  1 утке
+
+# XP for level
+func xpByLevel(level: Int) = {
+  pow(level * xpLevelRecipScale, 4, xpLevelPow, 4, 4, HALFUP) # (level / 0.32)^2.5
+}
+
+func levelByXP(xp: Int) = {
+  fraction(xpLevelScale, pow(xp, 4, xpLevelRecipPow, 4, 4, DOWN), SCALE8) # 0.32 * xp^(1 / 2.5)
+}
+
+func maxHealth(level: Int) = {
+  100 + level
+}
+
+func levelUp(currLevel: Int, newXP: Int) = {
+  let newLevel = levelByXP(newXP)
+  [newLevel, numPointsOnLevelUp * (newLevel - currLevel)]
+}
