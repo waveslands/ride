@@ -58,7 +58,6 @@ let xpOnboard = 1000_0000 # Приход по реферальной ссылк�
 
 let xpHeal = 1_0000 # Самолечение 1 аптечка любого уровня  1 утке
 
-# XP for level
 func xpByLevel(level: Int) = {
   pow(level * xpLevelRecipScale, 4, xpLevelPow, 4, 4, HALFUP) # (level / 0.32)^2.5
 }

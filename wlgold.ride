@@ -209,7 +209,6 @@ func onStakeLand(addr: String) = {
 }
 
 # callback for staking contract
-# only call for user's last land unstaked
 @Callable(i)
 func onUnstakeLand(addr: String) = {
   if (i.caller != stakingContract) then throw("Permission denied") else
