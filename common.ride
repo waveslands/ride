@@ -2,6 +2,10 @@
 {-# SCRIPT_TYPE ACCOUNT #-}
 {-# CONTENT_TYPE LIBRARY #-}
 
+# kill switches
+let KSALLOWWLGOLD = true
+let KSALLOWXPLEVELS = true
+
 let chain = this.bytes.drop(1).take(1)
 let usdtAssetId = match(chain) {
   case base16'57' => base58'9wc3LXNA4TEBsXyKtoLE9mrbDD7WMHXvXrCjZvabLAsi'
@@ -68,19 +72,16 @@ let recLandSize = 1
 let recTerrains = 2
 let recContinent = 3
 
-func keyResProportions() = "resTypesProportions"
-func keyStakedLandsByOwner(ownerAddr: String) = "stakedLandsByOwner_" + ownerAddr
-let wlgIssuedAmountKey = "wlg_issuedAmount"
 let wlgAssetIdKey = "wlg_assetId"
 let wlgAssetId = wlgContract.getBinary(wlgAssetIdKey).valueOrErrorMessage("Not initialized yet")
 
-let idxWlgAmount = 0
-let idxWlgPrice = 1
-let idxWlgFunds = 2
-let idxWlgEconomy = 3
-let idxWlgActivity = 4
-let idxWlgArbitrage = 5
-let idxWlgPool = 6
+# data indices to access effective gWL array
+let IdxEffTotal = 0
+let IdxEffUser  = 1
+
+func keyResProportions() = "resTypesProportions"
+func keyStakedLandsByOwner(ownerAddr: String) = "stakedLandsByOwner_" + ownerAddr
+func keyStakedPiecesByOwner(ownerAddr: String) = "stakedPiecesByOwner_" + ownerAddr
 
 func asString(v: Any) = {
   match v {
@@ -118,7 +119,6 @@ func numPiecesBySize(landSize: String) = {
 }
 
 # get staked land pieces [total, user]
-# todo: now we have keyStakedPiecesByOwner, so refactor it after fixing actual data
 func getVotingPower(userAddrStrOrEmpty: String) = {
   let props = stakingContract.getString(keyResProportions()).valueOrElse("0_0_0_0_0_0").split("_")
   
@@ -126,29 +126,9 @@ func getVotingPower(userAddrStrOrEmpty: String) = {
   
   let totalPower = FOLD<6>(props, 0, adder)
 
-  let usersPower = if (userAddrStrOrEmpty == "") then 0 else {
-    let landsStr = stakingContract.getString(keyStakedLandsByOwner(userAddrStrOrEmpty))
-    let lands = if (landsStr.isDefined()) then split_51C(landsStr.value(), "_") else []
-
-    func oneLand(acc: Int, landAssetId: String) = {
-      let asset = assetInfo(landAssetId.fromBase58String()).value()
-      let landSize = asset.description.split("_")[recLandSize]
-      acc + numPiecesBySize(landSize)
-    }
-    FOLD<100>(lands, 0, oneLand)
-  }
+  let usersPower = stakingContract.getInteger(keyStakedPiecesByOwner(userAddrStrOrEmpty)).valueOrElse(0)
 
   [totalPower, usersPower]
-}
-
-func getWlgStats() = {
-  let issuedAmount = wlgContract.getInteger(wlgIssuedAmountKey).valueOrErrorMessage("WLGOLD is not issued yet")
-  let economyUsd = assetBalance(economyContract, usdtAssetId)
-  let restUsd = assetBalance(restContract, usdtAssetId)
-  let wlgUsd = assetBalance(wlgContract, usdtAssetId)
-  let puzzleUsd = assetBalance(puzzlePoolContract, usdtAssetId)
-  let totalFundsUsd = economyUsd + restUsd + wlgUsd #+ puzzleUsd
-  [issuedAmount, fraction(totalFundsUsd, MULT8, issuedAmount), totalFundsUsd, economyUsd, restUsd, wlgUsd, puzzleUsd]
 }
 
 # print integer as fixed point string

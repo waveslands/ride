@@ -109,13 +109,12 @@ func prolog() = {
 func setCommon(acc: (Int, List[String], Int, Int, Int, List[String], List[String], Boolean, Int), item: String) = {
   let j = acc._1 # iterate res/mat/prod
   let isProd = acc._8
-  let pkgSize = if (isProd) then productionMatrix[j].split("_")[recipeIdxPacksize].parseIntValue() else 0
   let itemParts = item.split("@")
   if (itemParts.size() != 2) then throw("Incorrect order format, should be amount@price") else
   let newOrdAm = itemParts[0].parseIntValue()
   let newOrdPr = itemParts[1].parseIntValue()
   let newOrdUsd = fraction(newOrdAm, newOrdPr, MULT8) # can be <=> 0
-  let newOrdVol = toVolume(newOrdAm, pkgSize, isProd)
+  let newOrdVol = toVolume(newOrdAm, productPkgSize, isProd)
   let whInit = if (size(acc._6) > j) then acc._6[j].parseIntValue() else 0
   let curOrdParts = (if (size(acc._7) > j) then  acc._7[j] else "0@0").split("@")
   let curOrdAm = curOrdParts[0].parseIntValue()
@@ -124,26 +123,26 @@ func setCommon(acc: (Int, List[String], Int, Int, Int, List[String], List[String
   let curOrdUsd = fraction(curOrdAm, curOrdPr, MULT8) # can be <=> 0
   if (newOrdAm == 0) then { # unlock from order to wh
     if (curOrdAm > 0) then { # old order was BUY => free locked space and locked usd
-      (j+1, acc._2 :+ toString(whInit), acc._3, acc._4, acc._5 - curOrdUsd, acc._6, acc._7, isProd, acc._9 + toVolume(whInit, pkgSize, isProd))
+      (j+1, acc._2 :+ toString(whInit), acc._3, acc._4, acc._5 - curOrdUsd, acc._6, acc._7, isProd, acc._9 + toVolume(whInit, productPkgSize, isProd))
     } else {
       # curOrdAm == 0 => do nothing
       # curOrdAm < 0, old order was Sell => return locked items to WH, free locked space. No usd was locked
-      (j+1, acc._2 :+ toString(whInit - curOrdAm), acc._3, acc._4, acc._5, acc._6, acc._7, isProd, acc._9 + toVolume(whInit - curOrdAm, pkgSize, isProd))
+      (j+1, acc._2 :+ toString(whInit - curOrdAm), acc._3, acc._4, acc._5, acc._6, acc._7, isProd, acc._9 + toVolume(whInit - curOrdAm, productPkgSize, isProd))
     }
   } else if (newOrdAm > 0) then { # buy to wh: lock some wh volume for this buy, lock usdt for buy
     if (curOrdAm < 0) then { # old order was Sell => return locked items to WH, free locked space. No usd was locked
-      (j+1, acc._2 :+ toString(whInit - curOrdAm), acc._3 + newOrdVol, acc._4, acc._5 + newOrdUsd, acc._6, acc._7, isProd, toVolume(whInit - curOrdAm, pkgSize, isProd))
+      (j+1, acc._2 :+ toString(whInit - curOrdAm), acc._3 + newOrdVol, acc._4, acc._5 + newOrdUsd, acc._6, acc._7, isProd, toVolume(whInit - curOrdAm, productPkgSize, isProd))
     } else { # curOrdAm >= 0, old order was BUY or none => modify WH locked space and locked usd
-      (j+1, acc._2 :+ toString(whInit), acc._3 + newOrdVol, acc._4, acc._5 + newOrdUsd - curOrdUsd, acc._6, acc._7, isProd, toVolume(whInit, pkgSize, isProd))
+      (j+1, acc._2 :+ toString(whInit), acc._3 + newOrdVol, acc._4, acc._5 + newOrdUsd - curOrdUsd, acc._6, acc._7, isProd, toVolume(whInit, productPkgSize, isProd))
     }
   } else { # newOrdAm < 0, sell: lock from wh to order
     if (curOrdAm < 0) then { # old order was Sell => return locked items to WH, modify locked space. No usd was locked
       let amDiff = curOrdAm - newOrdAm
       if (whInit - amDiff < 0) then throw("Attempt to take " + toString(amDiff) + " from warehouse, but only " + whInit.toString() + " available") else
-      (j+1, acc._2 :+ toString(whInit - amDiff), acc._3, acc._4 - newOrdVol, acc._5, acc._6, acc._7, isProd, toVolume(whInit - amDiff, pkgSize, isProd))
+      (j+1, acc._2 :+ toString(whInit - amDiff), acc._3, acc._4 - newOrdVol, acc._5, acc._6, acc._7, isProd, toVolume(whInit - amDiff, productPkgSize, isProd))
     } else { # curOrdAm >= 0, old order was BUY or none => modify WH locked space and free locked usd
       if (whInit + newOrdAm < 0) then throw("Attempt to take " + toString(-newOrdAm) + " from warehouse, but only " + whInit.toString() + " available") else
-      (j+1, acc._2 :+ toString(whInit + newOrdAm), acc._3, acc._4 - newOrdVol, acc._5 - curOrdUsd, acc._6, acc._7, isProd, toVolume(whInit + newOrdAm, pkgSize, isProd))
+      (j+1, acc._2 :+ toString(whInit + newOrdAm), acc._3, acc._4 - newOrdVol, acc._5 - curOrdUsd, acc._6, acc._7, isProd, toVolume(whInit + newOrdAm, productPkgSize, isProd))
     }
   }
 }
@@ -191,7 +190,6 @@ func setInternal(currentWh: List[String], currentOrd: List[String], newOrd: List
 func acceptCommon(acc: (List[String], List[String], List[String], Int, Int, Int, Int, List[String], List[String], List[String], List[String], Boolean, Int), bpOrdItem: String) = {
   let j = acc._7 # iterate res/mat/prod
   let isProd = acc._12
-  let pkgSize = if (isProd) then productionMatrix[j].split("_")[recipeIdxPacksize].parseIntValue() else 0
   let bpOrdParts = bpOrdItem.split("@")
   if (bpOrdParts.size() != 2) then throw("Incorrect order format, should be amount@price") else
   let bpOrdAm = bpOrdParts[0].parseIntValue()
@@ -206,7 +204,7 @@ func acceptCommon(acc: (List[String], List[String], List[String], Int, Int, Int,
   let whOrdPr = whOrdParts[1].parseIntValue()
   if (bpOrdAm != 0 && bpOrdPr != whOrdPr) then throw("Prices of " + acc._11[j] + " don't match! WH price=" + whOrdPr.toString() + ", your price=" + bpOrdPr.toString()) else
   let whOrdUsd = fraction(whOrdAm, whOrdPr, MULT8) # can be <=> 0
-  let deltaVol = toVolume(bpOrdAm, pkgSize, isProd)
+  let deltaVol = toVolume(bpOrdAm, productPkgSize, isProd)
   if (bpOrdAm == 0) then { # skip position
     (acc._1 :+ whInit.toString(), acc._2 :+ whOrdInit, acc._3 :+ bpInit.toString(), acc._4, acc._5, acc._6, acc._7 + 1, acc._8, acc._9, acc._10, acc._11, isProd, acc._13)
   } else if (bpOrdAm > 0) then { # move from wh_shop to bp
@@ -418,27 +416,27 @@ func craftGoods(productIdx: Int, quantity: Int) = {
   let matList = currentPack[bpIdxMat].split("_")
   if (productIdx < 0 || productIdx >= productionMatrix.size()) then throw("Unknown product idx=" + productIdx.toString()) else
   let recipe = productionMatrix[productIdx].split("_")
-  if (recipe.size() != NUMRES + 3) then throw("Fatal: unknown recipe: " + productionMatrix[productIdx]) else
-  let productContIdx = recipe[recipeIdxContinent].parseIntValue()
+  if (recipe.size() != recipeSize) then throw("Fatal: unknown recipe: " + productionMatrix[productIdx]) else
+  let productContIdx = recipe[rIdxContinent].parseIntValue()
   if (continents[productContIdx] != cont) then throw("This product is available in " + continents[productContIdx] + ", but you are in " + cont) else
 
   let prodList = if (currentPack[bpIdxProd] == "") then [] else currentPack[bpIdxProd].split("_")
   # Iterate backpack products, pad backpack with zeroes to match recipes size; add quantity of needed product
   func filler(acc: (List[String], Int), ignoredItem: String) = {
-    let n = acc._2 # counter of products in backpack, < productionMatrix.size()
+    let n = acc._2 # counter of products in backpack < productionMatrix.size()
     let xs = if (n < prodList.size()) then prodList[n] else "0"
     let x = xs.parseIntValue()
-    let amount = quantity * recipe[recipeIdxPacksize].parseIntValue()
+    let amount = quantity * productPkgSize
     let y = if (n == productIdx) then toString(x + amount) else xs
     (acc._1 :+ y, n + 1)
   }
   let bpProd = (FOLD<50>(productionMatrix, ([], 0), filler))._1 # list of updated products in backpack
   # Iterate materials
   func producer(acc: (List[String], Int), j: Int) = {
-    let needMat = recipe[j].parseIntValue() * MULT7 * quantity
+    let needMat = recipe[j].parseIntValue() * MULT6 * quantity
     let haveMat = matList[j].parseIntValue()
-    if (needMat > haveMat) then throw("You have " + matList[j] + " of " + matTypes[j]
-      + ", but recipe requires " + needMat.toString() + " for quantity " + quantity.toString()) else
+    if (needMat > haveMat) then throw("You have " + haveMat.fixedPoint(8) + " of " + matTypes[j]
+      + ", but recipe requires " + needMat.fixedPoint(8) + " for quantity " + quantity.toString()) else
     if (needMat > 0) then {
       (acc._1 :+ toString(haveMat - needMat), # decrease backpack material by needMat
       acc._2 + needMat)
@@ -646,14 +644,13 @@ func sellProductsToES(amounts: List[Int]) = {
     let quantity = if (size(amounts) > j) then amounts[j] else 0
     if (quantity < 0) then throw("Quantity cannot be negative") else
     let recipe = recipeStr.split("_")
-    if (recipe.size() != NUMRES + 3) then throw("Fatal: unknown recipe: " + recipeStr) else
-    let packSize = recipe[recipeIdxPacksize].parseIntValue()
-    let maxAmount = ESMAXPACKAGES * packSize
+    if (recipe.size() != recipeSize) then throw("Fatal: unknown recipe: " + recipeStr) else
+    let maxAmount = ESMAXPACKAGES * productPkgSize
     let existAmount = if (size(existAmounts) > j) then existAmounts[j].parseIntValue() else 0
     let canBuy = maxAmount - existAmount
     if (quantity > canBuy) then throw("Warehouse can buy only " + canBuy.toString() + " of " + prodTypes[j]) else
     let totalMat = getRecipeMaterials(recipe)
-    let unitPrice = fraction(totalMat * ESBUYCOEF, RESOURCEPRICEMIN, 10 * packSize)
+    let unitPrice = fraction(totalMat * ESBUYCOEF, RESOURCEPRICEMIN, 10 * productPkgSize)
     let bpProdAmount = if (prodList.size() > j) then prodList[j].parseIntValue() else 0
     if (bpProdAmount < quantity) then throw("You have only " + bpProdAmount.toString() + " of " + prodTypes[j]) else
 

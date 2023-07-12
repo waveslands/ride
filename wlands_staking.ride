@@ -130,6 +130,7 @@ func subtractMaterials(shouldUseMat: Boolean, has: List[String], totalNeed: Int)
   if (shouldUseMat) then (FOLD<6>([0, 1, 2, 3, 4, 5], [], subtractor)) else has
 }
 
+# pHas: list of products currently in backpack
 # pUsed: 5,1_12,2 (product index, used quantity)
 func subtractProducts(pHas: String, pUsed: String) = {
   if (pUsed == "") then pHas else
@@ -151,7 +152,7 @@ func subtractProducts(pHas: String, pUsed: String) = {
     }
     let a = FOLD<10>(pUsed.split("_"), 0, checkUsed)
     let curr = if (j < pList.size()) then pList[j].parseIntValue() else 0
-    let newAmt = if (curr < a) then throw("You have " + curr.toString() + " of " + prodTypes[j] + ", but tried to use " + a.toString()) else curr - a
+    let newAmt = if (curr >= a) then curr - a else throw("You have " + curr.toString() + " of " + prodTypes[j] + ", but tried to use " + a.toString())
     (j + 1, acc._2 :+ newAmt.toString())
   }
   let newProd = FOLD<50>(productionMatrix, (0, []), subP)
@@ -289,8 +290,7 @@ func getWarehouseOccupiedVol(currentWh: List[String]) = {
   # acc: (productIndex, productsVolume)
   func sumProd(acc: (Int, Int), item: String) = {
     let idx = acc._1
-    let pkgSize = getPkgSize(idx)
-    let pkgs = (item.parseIntValue() + pkgSize - 1) / pkgSize
+    let pkgs = (item.parseIntValue() + productPkgSize - 1) / productPkgSize
     (idx + 1, acc._2 + pkgs * MULT8)
   }
   let whResVol = FOLD<6>(currentWh[whIdxRes].split("_"), 0, sumResMat)
@@ -394,7 +394,6 @@ func moveStuff(cargoParts: List[String], currentWh: List[String], currentPack: L
   # acc: counter, whProd, bpProd, volume
   func mvP(acc: (Int, List[String], List[String], Int), item: String) = {
     let i = acc._1
-    let pkgSize = getPkgSize(i)
     let am = item.parseIntValue()
     let whp = if (currWhProd.size() > i) then currWhProd[i].parseIntValue() else 0
     let bpp = if (currentPackProd.size() > i) then currentPackProd[i].parseIntValue() else 0
@@ -402,11 +401,11 @@ func moveStuff(cargoParts: List[String], currentWh: List[String], currentPack: L
       (i+1, acc._2 :+ whp.toString(), acc._3 :+ bpp.toString(), acc._4)
     } else if (am > 0) then { # move from bp to wh
       if (bpp < am) then throw("Attempt to take " + item + " from backpack, but only " + bpp.toString() + " available") else
-      let deltaVol = toVolume(whp + am, pkgSize) - toVolume(whp, pkgSize)
+      let deltaVol = toVolume(whp + am, productPkgSize) - toVolume(whp, productPkgSize)
       (i+1, acc._2 :+ toString(whp + am), acc._3 :+ toString(bpp - am), acc._4 + deltaVol)
     } else { # move from wh to bp
       if (whp < -am) then throw("Attempt to take " + toString(-am) + " from warehouse, but only " + whp.toString() + " available") else
-      let deltaVol = toVolume(whp + am, pkgSize) - toVolume(whp, pkgSize)
+      let deltaVol = toVolume(whp + am, productPkgSize) - toVolume(whp, productPkgSize)
       (i+1, acc._2 :+ toString(whp + am), acc._3 :+ toString(bpp - am), acc._4 + deltaVol)
     }
   }
@@ -604,6 +603,7 @@ func upInfraCommon(shouldUseMat: Boolean, caller: Address, paymentAmount: Int, l
 }
 
 func updateDuckStatsInternal(duckAssetId: String, deltaXP: Int) = {
+  if (!KSALLOWXPLEVELS) then ([], 0) else
   let lvlKey = keyDuckLevel(duckAssetId)
   let xpKey = keyDuckXP(duckAssetId)
   let xp = stakingContract.getInteger(xpKey).valueOrElse(0)
@@ -618,6 +618,7 @@ func updateDuckStatsInternal(duckAssetId: String, deltaXP: Int) = {
 }
 
 func updateAccStatsInternal(addr: String, deltaXP: Int) = {
+  if (!KSALLOWXPLEVELS) then ([], 0) else
   let lvlKey = keyUserLevel(addr)
   let xpKey = keyUserXP(addr)
   let xp = stakingContract.getInteger(xpKey).valueOrElse(0)
@@ -1043,7 +1044,7 @@ func heal(quantityL1: Int, quantityL2: Int, quantityL3: Int) = {
   let prodList = if (currentPack[bpIdxProd] == "") then [] else currentPack[bpIdxProd].split("_")
 
   func iterateProd(acc: (List[String], Int, Int), ignoredItem: String) = {
-    let n = acc._2 # counter of products in backpack, < productionMatrix.size()
+    let n = acc._2 # counter of products in backpack < productionMatrix.size()
     let x = if (n < prodList.size()) then prodList[n].parseIntValue() else 0
     if (n < 3) then { # medkits
       let q = qts[n]
@@ -1088,8 +1089,7 @@ func healES() = {
   let newES = makeString(cons(toString(existAmount - 1), existAmounts.removeByIndex(0)), "_")
   let recipe = productionMatrix[0].split("_")
   let totalMat = getRecipeMaterials(recipe)
-  let packSize = recipe[recipeIdxPacksize].parseIntValue()
-  let sellPrice = fraction(totalMat * ESSELLCOEF, RESOURCEPRICEMIN, 10 * packSize)
+  let sellPrice = fraction(totalMat * ESSELLCOEF, RESOURCEPRICEMIN, 10 * productPkgSize)
   if (pmt.amount != sellPrice) then throw("Payment attached should be " + sellPrice.toString()) else
   let result = economyContract.invoke("updateEsStorage", [newES], [AttachedPayment(usdtAssetId, sellPrice)]).asString()
 

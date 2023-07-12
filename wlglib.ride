@@ -1,0 +1,149 @@
+{-# STDLIB_VERSION 6 #-}
+{-# SCRIPT_TYPE ACCOUNT #-}
+{-# CONTENT_TYPE LIBRARY #-}
+
+# wlgold contract
+let M6 = 1_000_000
+let M8 = 1_0000_0000
+let MILLION6 = 1000000_0000_0000 # 1 mil WLG tokens
+let MARKETINGSHARE = 100000 # 10% 6 decimals
+let TEAMSHARE = 200000 # 20% 6 decimals
+let ACTIVITYSHARE = 100000 # 10% 6 decimals
+let PLAYERSHARE = 400000 # 40% 6 decimals
+let YEARMILLIS = 31557600000 # 365.25*24*3600*1000
+let WEEKMILLIS = 604800000 # 7*24*3600*1000
+let MAXPERIOD = 156 # 52 weeks * 3 years
+
+let marketingAddrKey = "marketingAddr"
+let teamAddrKey = "teamAddr"
+let lastMarketingTimeKey = "lastClaimedTime_marketing"
+let marketingAmountLeftKey = "marketingAmountLeft"
+let lastTeamTimeKey = "lastClaimedTime_team"
+let teamAmountLeftKey = "teamAmountLeft"
+let lastActivitiesTimeKey = "lastClaimedTime_activities"
+let actAmountLeftKey = "activitiesAmountLeft"
+let stakersAmountLeftKey = "stakersAmountLeft"
+func keyLastClaimedTimeByUser(addr: String) = "lastClaimedTimeUser_" + addr
+
+let wlgIssueTimeKey = "wlg_issueTime"
+let wlgIssuedAmountKey = "wlg_issuedAmount"
+
+let idxWlgAmount = 0
+let idxWlgPrice = 1
+let idxWlgFunds = 2
+let idxWlgEconomy = 3
+let idxWlgActivity = 4
+let idxWlgArbitrage = 5
+let idxWlgPool = 6
+let idxWlgIssueTime = 7
+let idxWlgLastMTATime = 8
+let idxWlgMarketingTotal = 9
+let idxWlgMarketingAmLeft = 10
+let idxWlgMarketingAmAvailNow = 11
+let idxWlgMarketingWlgold = 12
+let idxWlgTeamTotal = 13
+let idxWlgTeamAmLeft = 14
+let idxWlgTeamAmAvailNow = 15
+let idxWlgTeamWlgold = 16
+let idxWlgActTotal = 17
+let idxWlgActAmLeft = 18
+let idxWlgActAmAvailNow = 19
+let idxWlgActWlgold = 20
+let idxWlgCurPeriod = 21
+let idxWlgAmLeftTotal = 22
+let idxWlgCurPeriodDistribution = 23
+let idxWlgLastUserTime = 24
+let idxWlgUserAmAvailNow = 25
+
+let dappRest       = 0
+let dappStaking    = 1
+let dappEconomy    = 2
+let dappGovernance = 3
+let dappWlg        = 4
+let dappPuzzle     = 5
+
+# get staked land pieces [total, user]
+# todo: after fixing actual data
+func getPieces(userAddrStrOrEmpty: String, stakingContract: Address) = {
+  let props = stakingContract.getString("resTypesProportions").valueOrElse("0_0_0_0_0_0").split("_")
+  
+  func adder(acc: Int, item: String) = acc + item.parseIntValue()
+  
+  let totalPower = FOLD<6>(props, 0, adder)
+
+  let usersPower = stakingContract.getInteger("stakedPiecesByOwner_" + userAddrStrOrEmpty).valueOrElse(0)
+
+  [totalPower, usersPower]
+}
+
+# А еще статистику для игрока аналогичную, плюс текущий номер недели и сколько в этой неделе будет распределено на всех
+func getWlgStats(userAddrOpt: String, contracts: List[Address], usdtId: ByteVector) = {
+  let issuedAmount = contracts[dappWlg].getInteger(wlgIssuedAmountKey).valueOrErrorMessage("WLGOLD is not issued yet")
+  let economyUsd = assetBalance(contracts[dappEconomy], usdtId)
+  let restUsd = assetBalance(contracts[dappRest], usdtId)
+  let wlgUsd = assetBalance(contracts[dappWlg], usdtId)
+  let puzzleUsd = assetBalance(contracts[dappPuzzle], usdtId)
+  let totalFundsUsd = economyUsd + restUsd + wlgUsd #+ puzzleUsd
+
+  let wlgId = contracts[dappWlg].getBinary("wlg_assetId").valueOrErrorMessage("Not initialized yet")
+  let now = lastBlock.timestamp
+  let issueTime = contracts[dappWlg].getInteger(wlgIssueTimeKey).valueOrErrorMessage("Not initialized")
+
+  let marketingTotal = fraction(MILLION6, MARKETINGSHARE, M6)
+  let marketingAmountLeft = contracts[dappWlg].getInteger(marketingAmountLeftKey).valueOrElse(marketingTotal)
+  let lastMarketingTime = contracts[dappWlg].getInteger(lastMarketingTimeKey).valueOrElse(issueTime)
+  let marketingAddr = contracts[dappWlg].getString(marketingAddrKey).value().addressFromStringValue()
+  let marketingAmountAvailableNow = min([fraction(marketingTotal, now - lastMarketingTime, YEARMILLIS), marketingAmountLeft])
+  let marketingWlgold = assetBalance(marketingAddr, wlgId)
+  
+  let teamTotal = fraction(MILLION6, TEAMSHARE, M6)
+  let teamAmountLeft = contracts[dappWlg].getInteger(teamAmountLeftKey).valueOrElse(teamTotal)
+  let lastTeamTime = contracts[dappWlg].getInteger(lastTeamTimeKey).valueOrElse(issueTime)
+  let teamAddr = contracts[dappWlg].getString(teamAddrKey).value().addressFromStringValue()
+  let teamAmountAvailableNow = min([fraction(teamTotal, now - lastTeamTime, 3 * YEARMILLIS), teamAmountLeft])
+  let teamWlgold = assetBalance(teamAddr, wlgId)
+
+  let actTotal = fraction(MILLION6, ACTIVITYSHARE, M6)
+  let actAmountLeft = contracts[dappRest].getInteger(actAmountLeftKey).valueOrElse(actTotal)
+  let lastActivitiesTime = contracts[dappRest].getInteger(lastActivitiesTimeKey).valueOrElse(issueTime)
+  let actAmountAvailableNow = min([fraction(actTotal, now - lastActivitiesTime, 3 * YEARMILLIS), actAmountLeft])
+  let actWlgold = assetBalance(contracts[dappRest], wlgId)
+  
+  let lastUserTime = contracts[dappWlg].getInteger(keyLastClaimedTimeByUser(userAddrOpt)).valueOrElse(issueTime)
+  let lastUserPeriod = (lastUserTime - issueTime) / WEEKMILLIS
+  let curPeriod = (now - issueTime) / WEEKMILLIS
+  let period = min([lastUserPeriod + 1, curPeriod])
+  let eff = getPieces(userAddrOpt, contracts[dappStaking])
+  let totalPieces = eff[0]
+  let amountLeftTotal = contracts[dappWlg].getInteger(stakersAmountLeftKey).valueOrElse(0)
+  let curPeriodDistribution = fraction(amountLeftTotal, 2 * totalPieces, (totalPieces + max([100000, totalPieces]) * (MAXPERIOD - period)))
+  let userAmount = fraction(fraction(curPeriodDistribution, eff[1], totalPieces), now - lastUserTime, 3 * YEARMILLIS)
+
+  [ issuedAmount, 
+    fraction(totalFundsUsd, M8, issuedAmount), 
+    totalFundsUsd, 
+    economyUsd, 
+    restUsd, 
+    wlgUsd, 
+    puzzleUsd,
+    issueTime,
+    lastMarketingTime, # = team and activities time
+    marketingTotal,
+    marketingAmountLeft,
+    marketingAmountAvailableNow,
+    marketingWlgold,
+    teamTotal,
+    teamAmountLeft,
+    teamAmountAvailableNow,
+    teamWlgold,
+    actTotal,
+    actAmountLeft,
+    actAmountAvailableNow,
+    actWlgold,
+    curPeriod,
+    amountLeftTotal,
+    curPeriodDistribution,
+    lastUserTime,
+    userAmount
+  ]
+}

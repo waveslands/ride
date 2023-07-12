@@ -1,7 +1,7 @@
 {-# STDLIB_VERSION 6 #-}
 {-# CONTENT_TYPE DAPP #-}
 {-# SCRIPT_TYPE ACCOUNT #-}
-{-# IMPORT common.ride,landlib.ride,rpglib.ride #-}
+{-# IMPORT common.ride,landlib.ride,rpglib.ride,wlglib.ride #-}
 
 let USDTPRIZEPART = 500_000 # 0.5
 
@@ -330,14 +330,13 @@ func getEmergencyServiceDataREADONLY() = {
   let existAmounts = if (existStr.isDefined()) then existStr.value().split("_") else []
 
   func singleProd(acc: (List[String], Int), recipeStr: String) = {
-    let n = acc._2 # product index, < productionMatrix.size()
+    let n = acc._2 # product index < productionMatrix.size()
     let recipe = recipeStr.split("_")
-    let packSize = recipe[recipeIdxPacksize].parseIntValue()
-    let maxAmount = if (n == 0) then ESMAXPACKAGES * packSize else 0 # medkit1 only
+    let maxAmount = if (n == 0) then ESMAXPACKAGES * productPkgSize else 0 # medkit1 only
     let existAmount = if (size(existAmounts) > n) then existAmounts[n].parseIntValue() else 0
     let totalMat = getRecipeMaterials(recipe)
-    let buyPrice = fraction(totalMat * ESBUYCOEF, RESOURCEPRICEMIN, 10 * packSize)
-    let sellPrice = fraction(totalMat * ESSELLCOEF, RESOURCEPRICEMIN, 10 * packSize)
+    let buyPrice = fraction(totalMat * ESBUYCOEF, RESOURCEPRICEMIN, 10 * productPkgSize)
+    let sellPrice = fraction(totalMat * ESSELLCOEF, RESOURCEPRICEMIN, 10 * productPkgSize)
 
     let y = makeString([maxAmount.toString(), existAmount.toString(), buyPrice.toString(), sellPrice.toString()], "_")
     (acc._1 :+ y, n + 1)
@@ -348,8 +347,8 @@ func getEmergencyServiceDataREADONLY() = {
 }
 
 @Callable(i)
-func wlgStatsREADONLY() = {
-  let curStats = getWlgStats()
+func wlgStatsREADONLY(userAddrOpt: String) = {
+  let curStats = getWlgStats(userAddrOpt, [restContract, stakingContract, economyContract, govContract, wlgContract, puzzlePoolContract], usdtAssetId)
   ([], [
     "%s%s%d__wlgAmount__" + curStats[idxWlgAmount].toString(),
     "%s%s%d__wlgPrice__" + curStats[idxWlgPrice].toString(),
@@ -357,6 +356,25 @@ func wlgStatsREADONLY() = {
     "%s%s%d__usdtEconomy__" + curStats[idxWlgEconomy].toString(),
     "%s%s%d__usdtActivity__" + curStats[idxWlgActivity].toString(),
     "%s%s%d__usdtArbitrage__" + curStats[idxWlgArbitrage].toString(),
-    "%s%s%d__usdtPool__" + curStats[idxWlgPool].toString()
+    "%s%s%d__usdtPool__" + curStats[idxWlgPool].toString(),
+    "%s%s%d__wlgIssueTime__" + curStats[idxWlgIssueTime].toString(),
+    "%s%s%d__wlgLastMarketingTeamActTime__" + curStats[idxWlgLastMTATime].toString(),
+    "%s%s%d__wlgMarketingTotal__" + curStats[idxWlgMarketingTotal].toString(),
+    "%s%s%d__wlgMarketingAmLeft__" + curStats[idxWlgMarketingAmLeft].toString(),
+    "%s%s%d__wlgMarketingAmAvailNow__" + curStats[idxWlgMarketingAmAvailNow].toString(),
+    "%s%s%d__wlgMarketingWlgold__" + curStats[idxWlgMarketingWlgold].toString(),
+    "%s%s%d__wlgTeamTotal__" + curStats[idxWlgTeamTotal].toString(),
+    "%s%s%d__wlgTeamAmLeft__" + curStats[idxWlgTeamAmLeft].toString(),
+    "%s%s%d__wlgTeamAmAvailNow__" + curStats[idxWlgTeamAmAvailNow].toString(),
+    "%s%s%d__wlgTeamWlgold__" + curStats[idxWlgTeamWlgold].toString(),
+    "%s%s%d__wlgActTotal__" + curStats[idxWlgActTotal].toString(),
+    "%s%s%d__wlgActAmLeft__" + curStats[idxWlgActAmLeft].toString(),
+    "%s%s%d__wlgActAmAvailNow__" + curStats[idxWlgActAmAvailNow].toString(),
+    "%s%s%d__wlgActWlgold__" + curStats[idxWlgActWlgold].toString(),
+    "%s%s%d__wlgCurPeriod__" + curStats[idxWlgCurPeriod].toString(),
+    "%s%s%d__wlgAmLeftTotal__" + curStats[idxWlgAmLeftTotal].toString(),
+    "%s%s%d__wlgCurPeriodDistribution__" + curStats[idxWlgCurPeriodDistribution].toString(),
+    "%s%s%d__wlgLastUserTime__" + curStats[idxWlgLastUserTime].toString(),
+    "%s%s%d__wlgUserAmAvailNow__" + curStats[idxWlgUserAmAvailNow].toString()
   ])
 }
