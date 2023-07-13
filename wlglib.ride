@@ -83,7 +83,7 @@ func getWlgStats(userAddrOpt: String, contracts: List[Address], usdtId: ByteVect
   let restUsd = assetBalance(contracts[dappRest], usdtId)
   let wlgUsd = assetBalance(contracts[dappWlg], usdtId)
   let puzzleUsd = assetBalance(contracts[dappPuzzle], usdtId)
-  let totalFundsUsd = economyUsd + restUsd + wlgUsd #+ puzzleUsd
+  let totalFundsUsd = economyUsd + wlgUsd # + restUsd + puzzleUsd
 
   let wlgId = contracts[dappWlg].getBinary("wlg_assetId").valueOrErrorMessage("Not initialized yet")
   let now = lastBlock.timestamp
