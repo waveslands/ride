@@ -11,8 +11,7 @@ let TEAMSHARE = 200000 # 20% 6 decimals
 let ACTIVITYSHARE = 100000 # 10% 6 decimals
 let PLAYERSHARE = 400000 # 40% 6 decimals
 let YEARMILLIS = 31557600000 # 365.25*24*3600*1000
-let WEEKMILLIS = 604800000 # 7*24*3600*1000
-let MAXPERIOD = 156 # 52 weeks * 3 years
+let CHECKTIME = 47336400000 # 1.5*365.25*24*3600*1000
 
 let marketingAddrKey = "marketingAddr"
 let teamAddrKey = "teamAddr"
@@ -24,6 +23,8 @@ let lastActivitiesTimeKey = "lastClaimedTime_activities"
 let actAmountLeftKey = "activitiesAmountLeft"
 let stakersAmountLeftKey = "stakersAmountLeft"
 func keyLastClaimedTimeByUser(addr: String) = "lastClaimedTimeUser_" + addr
+func keyLastArbTimeByUser(addr: String) = "lastArbTimeUser_" + addr
+func distributionByPeriod(period: Int) = fraction(MILLION6, PLAYERSHARE * (period + 1), 6 * M6) # periods 0, 1, 2
 
 let wlgIssueTimeKey = "wlg_issueTime"
 let wlgIssuedAmountKey = "wlg_issuedAmount"
@@ -63,7 +64,6 @@ let dappWlg        = 4
 let dappPuzzle     = 5
 
 # get staked land pieces [total, user]
-# todo: after fixing actual data
 func getPieces(userAddrStrOrEmpty: String, stakingContract: Address) = {
   let props = stakingContract.getString("resTypesProportions").valueOrElse("0_0_0_0_0_0").split("_")
   
@@ -76,12 +76,12 @@ func getPieces(userAddrStrOrEmpty: String, stakingContract: Address) = {
   [totalPower, usersPower]
 }
 
-# А еще статистику для игрока аналогичную, плюс текущий номер недели и сколько в этой неделе будет распределено на всех
-func getWlgStats(userAddrOpt: String, contracts: List[Address], usdtId: ByteVector) = {
+# usdtBalanceCorrection needed if USDT payment was attached to call, because RIDE v5+ counts payment amount as already added to balance
+func getWlgStats(userAddrOpt: String, contracts: List[Address], usdtId: ByteVector, usdtBalanceCorrection: Int) = {
   let issuedAmount = contracts[dappWlg].getInteger(wlgIssuedAmountKey).valueOrErrorMessage("WLGOLD is not issued yet")
   let economyUsd = assetBalance(contracts[dappEconomy], usdtId)
   let restUsd = assetBalance(contracts[dappRest], usdtId)
-  let wlgUsd = assetBalance(contracts[dappWlg], usdtId)
+  let wlgUsd = assetBalance(contracts[dappWlg], usdtId) - usdtBalanceCorrection # needed if payment is already added during invoke
   let puzzleUsd = assetBalance(contracts[dappPuzzle], usdtId)
   let totalFundsUsd = economyUsd + wlgUsd # + restUsd + puzzleUsd
 
@@ -110,17 +110,27 @@ func getWlgStats(userAddrOpt: String, contracts: List[Address], usdtId: ByteVect
   let actWlgold = assetBalance(contracts[dappRest], wlgId)
   
   let lastUserTime = contracts[dappWlg].getInteger(keyLastClaimedTimeByUser(userAddrOpt)).valueOrElse(issueTime)
-  let lastUserPeriod = (lastUserTime - issueTime) / WEEKMILLIS
-  let curPeriod = (now - issueTime) / WEEKMILLIS
-  let period = min([lastUserPeriod + 1, curPeriod])
+  let lastUserPeriod = (lastUserTime - issueTime) / YEARMILLIS
+  let nowLimited = min([now, issueTime + 3 * YEARMILLIS])
+  let curPeriod = min([(now - issueTime) / YEARMILLIS, 2])
   let eff = getPieces(userAddrOpt, contracts[dappStaking])
-  let totalPieces = eff[0]
+  let curPeriodDistribution = distributionByPeriod(curPeriod)
+  let userAmount = fraction(
+    if (lastUserPeriod == curPeriod) then
+      fraction(curPeriodDistribution, nowLimited - lastUserTime, YEARMILLIS)
+    else if (lastUserPeriod == curPeriod - 1) then 
+      fraction(distributionByPeriod(curPeriod-1), issueTime + YEARMILLIS * curPeriod - lastUserTime, YEARMILLIS) + 
+      fraction(curPeriodDistribution, nowLimited - (issueTime + YEARMILLIS * curPeriod), YEARMILLIS)
+    else # lastUserPeriod == curPeriod - 2
+      fraction(distributionByPeriod(curPeriod-2), issueTime + YEARMILLIS * (curPeriod-1) - lastUserTime, YEARMILLIS) + 
+      distributionByPeriod(curPeriod-1) + 
+      fraction(curPeriodDistribution, nowLimited - (issueTime + YEARMILLIS * curPeriod), YEARMILLIS)
+    , eff[1], eff[0])
+
   let amountLeftTotal = contracts[dappWlg].getInteger(stakersAmountLeftKey).valueOrElse(0)
-  let curPeriodDistribution = fraction(amountLeftTotal, 2 * totalPieces, (totalPieces + max([100000, totalPieces]) * (MAXPERIOD - period)))
-  let userAmount = fraction(fraction(curPeriodDistribution, eff[1], totalPieces), now - lastUserTime, 3 * YEARMILLIS)
 
   [ issuedAmount, 
-    fraction(totalFundsUsd, M8, issuedAmount), 
+    fraction(totalFundsUsd, M8, issuedAmount), # index WLGOLD price 
     totalFundsUsd, 
     economyUsd, 
     restUsd, 

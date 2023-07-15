@@ -332,11 +332,11 @@ func getEmergencyServiceDataREADONLY() = {
   func singleProd(acc: (List[String], Int), recipeStr: String) = {
     let n = acc._2 # product index < productionMatrix.size()
     let recipe = recipeStr.split("_")
-    let maxAmount = if (n == 0) then ESMAXPACKAGES * productPkgSize else 0 # medkit1 only
+    let maxAmount = if (n == 0) then ESMAXPACKAGES * PRODUCTPKGSIZE else 0 # medkit1 only
     let existAmount = if (size(existAmounts) > n) then existAmounts[n].parseIntValue() else 0
     let totalMat = getRecipeMaterials(recipe)
-    let buyPrice = fraction(totalMat * ESBUYCOEF, RESOURCEPRICEMIN, 10 * productPkgSize)
-    let sellPrice = fraction(totalMat * ESSELLCOEF, RESOURCEPRICEMIN, 10 * productPkgSize)
+    let buyPrice = fraction(totalMat * ESBUYCOEF, RESOURCEPRICEMIN, 10 * PRODUCTPKGSIZE)
+    let sellPrice = fraction(totalMat * ESSELLCOEF, RESOURCEPRICEMIN, 10 * PRODUCTPKGSIZE)
 
     let y = makeString([maxAmount.toString(), existAmount.toString(), buyPrice.toString(), sellPrice.toString()], "_")
     (acc._1 :+ y, n + 1)
@@ -348,7 +348,7 @@ func getEmergencyServiceDataREADONLY() = {
 
 @Callable(i)
 func wlgStatsREADONLY(userAddrOpt: String) = {
-  let curStats = getWlgStats(userAddrOpt, [restContract, stakingContract, economyContract, govContract, wlgContract, puzzlePoolContract], usdtAssetId)
+  let curStats = getWlgStats(userAddrOpt, [restContract, stakingContract, economyContract, govContract, wlgContract, puzzlePoolContract], usdtAssetId, 0)
   ([], [
     "%s%s%d__wlgAmount__" + curStats[idxWlgAmount].toString(),
     "%s%s%d__wlgPrice__" + curStats[idxWlgPrice].toString(),

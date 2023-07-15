@@ -1,7 +1,7 @@
 {-# STDLIB_VERSION 6 #-}
 {-# CONTENT_TYPE DAPP #-}
 {-# SCRIPT_TYPE ACCOUNT #-}
-{-# IMPORT common.ride,landlib.ride,rpglib.ride #-}
+{-# IMPORT common.ride,landlib.ride,rpglib.ride,wlglib.ride #-}
 
 let incubatorAddr = match(chain) {
   case base16'57' => "3PEktVux2RhchSN63DsDo4b4mz4QqzKSeDv".addressFromStringValue()
@@ -290,7 +290,7 @@ func getWarehouseOccupiedVol(currentWh: List[String]) = {
   # acc: (productIndex, productsVolume)
   func sumProd(acc: (Int, Int), item: String) = {
     let idx = acc._1
-    let pkgs = (item.parseIntValue() + productPkgSize - 1) / productPkgSize
+    let pkgs = (item.parseIntValue() + PRODUCTPKGSIZE - 1) / PRODUCTPKGSIZE
     (idx + 1, acc._2 + pkgs * MULT8)
   }
   let whResVol = FOLD<6>(currentWh[whIdxRes].split("_"), 0, sumResMat)
@@ -401,11 +401,11 @@ func moveStuff(cargoParts: List[String], currentWh: List[String], currentPack: L
       (i+1, acc._2 :+ whp.toString(), acc._3 :+ bpp.toString(), acc._4)
     } else if (am > 0) then { # move from bp to wh
       if (bpp < am) then throw("Attempt to take " + item + " from backpack, but only " + bpp.toString() + " available") else
-      let deltaVol = toVolume(whp + am, productPkgSize) - toVolume(whp, productPkgSize)
+      let deltaVol = toVolume(whp + am, PRODUCTPKGSIZE) - toVolume(whp, PRODUCTPKGSIZE)
       (i+1, acc._2 :+ toString(whp + am), acc._3 :+ toString(bpp - am), acc._4 + deltaVol)
     } else { # move from wh to bp
       if (whp < -am) then throw("Attempt to take " + toString(-am) + " from warehouse, but only " + whp.toString() + " available") else
-      let deltaVol = toVolume(whp + am, productPkgSize) - toVolume(whp, productPkgSize)
+      let deltaVol = toVolume(whp + am, PRODUCTPKGSIZE) - toVolume(whp, PRODUCTPKGSIZE)
       (i+1, acc._2 :+ toString(whp + am), acc._3 :+ toString(bpp - am), acc._4 + deltaVol)
     }
   }
@@ -857,7 +857,7 @@ func stakeLand() = {
   let infraLevel = getInteger(keyInfraLevelByAssetId(landAssetId)).valueOrElse(0)
   let piecesKey = keyStakedPiecesByOwner(address)
   let oldPieces = getInteger(piecesKey).valueOrElse(0)
-  let wlgResult = wlgContract.invoke("onStakeLand", [address], []).asInt()
+  let wlgResult = wlgContract.invoke("onStakeUnstakeLand", [address], []).asInt()
 
   ([IntegerEntry(timeKey, lastBlock.timestamp),
     IntegerEntry(keyStakedTimeByTypeAssetIdAndOwner(LANDPREFIX, landAssetId, address), lastBlock.timestamp),
@@ -887,13 +887,15 @@ func unstakeLand(landAssetIdIn: String) = {
   let idx = lands.indexOf(landAssetId)
   if (!idx.isDefined()) then throw("Your staked lands don't contain " + landAssetId) else
   # check if gWL are taking part in votings
-  let t = blockInfoByHeight(height).value().timestamp
-  let releaseTime = govContract.getInteger(keyUserGwlReleaseTime(addr)).valueOrElse(0)
-  if (t <= releaseTime) then throw("Your gWL are taking part in voting, cannot unstake until " + releaseTime.toString()) else
+  let now = lastBlock.timestamp
+  let govReleaseTime = govContract.getInteger(keyUserGwlReleaseTime(addr)).valueOrElse(0)
+  if (now <= govReleaseTime) then throw("Your gWL are taking part in voting, cannot unstake until " + govReleaseTime.toString()) else
+  let arbReleaseTime = wlgContract.getInteger(keyLastArbTimeByUser(addr)).valueOrElse(0) + arbitrageDelay
+  if (now < arbReleaseTime) then throw("Your staked lands took part in arbitrage, cannot unstake until " + arbReleaseTime.toString()) else
   let piecesKey = keyStakedPiecesByOwner(addr)
   let stakedPieces = getInteger(piecesKey).valueOrElse(0)
   let newPieces = if (stakedPieces < pieces) then 0 else stakedPieces - pieces
-  let wlgResult = wlgContract.invoke("onUnstakeLand", [addr], []).asInt()
+  let wlgResult = wlgContract.invoke("onStakeUnstakeLand", [addr], []).asInt()
 
   ([ScriptTransfer(i.caller, 1, landAssetId.fromBase58String()),
     DeleteEntry(keyStakedTimeByAssetId(landAssetId)),
@@ -1089,7 +1091,7 @@ func healES() = {
   let newES = makeString(cons(toString(existAmount - 1), existAmounts.removeByIndex(0)), "_")
   let recipe = productionMatrix[0].split("_")
   let totalMat = getRecipeMaterials(recipe)
-  let sellPrice = fraction(totalMat * ESSELLCOEF, RESOURCEPRICEMIN, 10 * productPkgSize)
+  let sellPrice = fraction(totalMat * ESSELLCOEF, RESOURCEPRICEMIN, 10 * PRODUCTPKGSIZE)
   if (pmt.amount != sellPrice) then throw("Payment attached should be " + sellPrice.toString()) else
   let result = economyContract.invoke("updateEsStorage", [newES], [AttachedPayment(usdtAssetId, sellPrice)]).asString()
 
@@ -1123,7 +1125,6 @@ func buySLand() = {
 }
 
 # todo: split by commit-reveal
-# todo: extract common part with flight
 #  Health|Mission|       Obstcales        |         Winds           |  Path  |  Timestamp  |Bonus ;newLocation: lastTxId : version
 # 240_240|6,6_0,0|K3,1_A0,1_F0,5_C1,4_T5,5|WWWWWWWWWWWWWWWWWWWWWWWWW|NNEENWWW|1685994541854|20hp;?_E_?:4NVYtGU1DgdxZVn6fUEbbq34VLZzSdi8nRnzWUoKuHQj:3
 @Callable(i)
@@ -1429,7 +1430,7 @@ func getWarehouseREADONLY(landAssetId: String) = {
   ([], makeString_2C(getWarehouse(keyWarehouseByLand(landAssetId), landIndex, infraLevel), ":"))
 }
 
-# callback for wl-gold contract
+# callback for economy and wl-gold contracts
 @Callable(i)
 func saveLastTx() = {
   if (i.caller != wlgContract && i.caller != economyContract) then throw("Access denied") else

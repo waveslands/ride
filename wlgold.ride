@@ -6,12 +6,10 @@
 let A6 = 100_000000 # 100.0
 let B8 = 5000_0000 # 0.5
 let profitAddrKey = "profitAddr"
-func keyLastArbTimeByUser(addr: String) = "lastArbTimeUser_" + addr
 let stakersAmountPaidTotalKey = "stakersAmountPaidTotal"
 func keyStakersAmountPaidUser(addr: String) = "stakersAmountPaidUser_" + addr
 
 func prolog() = {
-  if (stakingContract.getBoolean(keyBlocked()).valueOrElse(false)) then throw("Contracts are under maintenance") else
   stakingContract.invoke("saveLastTx", [], []).asInt()
 }
 
@@ -32,16 +30,19 @@ func getSwapLimit(addr: String) = {
 # 20% - team (during 3 years evenly) => claim to team wallet
 # 10% - game activities (during 3 years evenly) => claim to activities wallet
 # 40% - staked lands (during 3 years progressively) => claim to caller's wallet according to share
-# We assume, that in 3 years totalPieces will grow from current value to at least 100000 and the growth will be linear
-# Lets split 3 years by 156 week intervals,
-# each of them will have distribution amount proportional to current totalPieces (currentPeriodDistribution)
-# amountToClaim = currentPeriodDistribution * piecesShare * temporalShare
-# Such a scheme will be used first 1.5 years, and after gathering statistics - refined to final 1.5 years period
+# We assume, that for 3 years totalPieces will grow
+#         ____
+#     ____|___|
+# ____|___|___|
+# |___|___|___|
+# Lets split all distribution amount by 6 equal parts. In first year we distribute 1 part, in second - 2 parts, and in the last year - 3 parts
+# amountToClaim = currentYearDistribution * piecesShare * temporalShare
+# Such a scheme will be used first 1.5 years, and after gathering statistics - refined for final 1.5 years
 func claimInternal(addr: String) = {
   if (!KSALLOWWLGOLD) then ([], 0) else
   let caller = addr.addressFromStringValue()
 
-  let curStats = getWlgStats(addr, [restContract, stakingContract, economyContract, govContract, wlgContract, puzzlePoolContract], usdtAssetId)
+  let curStats = getWlgStats(addr, [restContract, stakingContract, economyContract, govContract, wlgContract, puzzlePoolContract], usdtAssetId, 0)
 
   let now = lastBlock.timestamp
   let issueTime = curStats[idxWlgIssueTime]
@@ -55,9 +56,7 @@ func claimInternal(addr: String) = {
   let actAmountLeft = curStats[idxWlgActAmLeft]
   let actAmount = curStats[idxWlgActAmAvailNow]
 
-  let userTimeKey = keyLastClaimedTimeByUser(addr)
-  if (curStats[idxWlgCurPeriod] > MAXPERIOD / 2) then throw("Please modify contract for next 1.5 years, according to stats") else
-  let amountLeftTotal = curStats[idxWlgAmLeftTotal]
+  if (now - issueTime > CHECKTIME) then throw("Please modify contract for next 1.5 years, according to stats") else
   let userAmount = curStats[idxWlgUserAmAvailNow]
   let userKey = keyStakersAmountPaidUser(addr)
 
@@ -67,14 +66,14 @@ func claimInternal(addr: String) = {
     ScriptTransfer(caller, userAmount, wlgAssetId),
     IntegerEntry(userKey, getInteger(userKey).valueOrElse(0) + userAmount),
     IntegerEntry(stakersAmountPaidTotalKey, getInteger(stakersAmountPaidTotalKey).valueOrElse(0) + userAmount),
-    IntegerEntry(stakersAmountLeftKey, amountLeftTotal - userAmount),
+    IntegerEntry(stakersAmountLeftKey, curStats[idxWlgAmLeftTotal] - userAmount),
     IntegerEntry(marketingAmountLeftKey, marketingAmountLeft - marketingAmount),
     IntegerEntry(lastMarketingTimeKey, now),
     IntegerEntry(teamAmountLeftKey, teamAmountLeft - teamAmount),
     IntegerEntry(lastTeamTimeKey, now),
     IntegerEntry(actAmountLeftKey, actAmountLeft - actAmount),
     IntegerEntry(lastActivitiesTimeKey, now),
-    IntegerEntry(userTimeKey, now)
+    IntegerEntry(keyLastClaimedTimeByUser(addr), now)
   ], userAmount)
 }
 
@@ -110,24 +109,23 @@ func buyWlg(minAmount: Int) = {
   if (i.payments.size() != 1) then throw("exactly 1 payment must be attached") else
   let pmt = i.payments[0]
   let usdtAmt = pmt.amount
-  let pmtAssetId = pmt.assetId.valueOrErrorMessage("WAVES can't be used as payment")
+  let pmtAssetId = pmt.assetId.valueOrErrorMessage("USDT payments only!")
   if (pmtAssetId != usdtAssetId) then throw("USDT payments only!") else
   let caller = i.caller
   let addr = caller.toString()
   let maxUsdt = getSwapLimit(addr)
   if (usdtAmt > maxUsdt) then throw("You can spend max " + maxUsdt.fixedPoint(6) + " USDT") else
   if (usdtAmt < MINSHOPPAYMENT) then throw("You can trade min " + MINSHOPPAYMENT.fixedPoint(6) + " USDT") else
-  let curStats = getWlgStats("", [restContract, stakingContract, economyContract, govContract, wlgContract, puzzlePoolContract], usdtAssetId)
+  let curStats = getWlgStats("", [restContract, stakingContract, economyContract, govContract, wlgContract, puzzlePoolContract], usdtAssetId, usdtAmt)
   let curWlgAmount = curStats[idxWlgAmount]
-  let oldFundsUsd = curStats[idxWlgFunds] - usdtAmt
-  # we can't use price from stats as payment already added to balance
-  let wlgPrice = fraction(oldFundsUsd, MULT8, curWlgAmount)
+  let fundsUsd = curStats[idxWlgFunds]
+  let wlgPrice = fraction(fundsUsd, MULT8, curWlgAmount)
   let buyPrice = fraction(wlgPrice, 6, 5) # +20%
   let wlgAmount = fraction(usdtAmt, MULT8, buyPrice)
   if (wlgAmount < minAmount) then throw("Price changed during operation, please try again") else
   let profitAmount = usdtAmt / 6
   let deltaFunds = usdtAmt - profitAmount
-  let reissued = fraction(curWlgAmount, deltaFunds, oldFundsUsd)
+  let reissued = fraction(curWlgAmount, deltaFunds, fundsUsd)
   ([Reissue(wlgAssetId, reissued, true),
     IntegerEntry(wlgIssuedAmountKey, curWlgAmount + reissued),
     IntegerEntry(keyLastArbTimeByUser(addr), lastBlock.timestamp),
@@ -145,12 +143,12 @@ func sellWlg(minAmount: Int) = {
   if (i.payments.size() != 1) then throw("exactly 1 payment must be attached") else
   let pmt = i.payments[0]
   let wlgAmt = pmt.amount
-  let pmtAssetId = pmt.assetId.valueOrErrorMessage("WAVES can't be used as payment")
+  let pmtAssetId = pmt.assetId.valueOrErrorMessage("WLGOLD payments only!")
   if (pmtAssetId != wlgAssetId) then throw("WLGOLD payments only!") else
   let caller = i.caller
   let addr = caller.toString()
   let maxUsdt = getSwapLimit(addr)
-  let curStats = getWlgStats("", [restContract, stakingContract, economyContract, govContract, wlgContract, puzzlePoolContract], usdtAssetId)
+  let curStats = getWlgStats("", [restContract, stakingContract, economyContract, govContract, wlgContract, puzzlePoolContract], usdtAssetId, 0)
   let curWlgAmount = curStats[idxWlgAmount]
   let sellPrice = fraction(curStats[idxWlgPrice], 4, 5) # -20%
   let usdtAmt = fraction(wlgAmt, sellPrice, MULT8)
@@ -172,21 +170,14 @@ func sellWlg(minAmount: Int) = {
 func claim() = {
 #  if (i.caller != this) then throw("Permission denied") else
   let prologResult = prolog()
+  if (i.payments.size() != 0) then throw("No payments required") else
   let actions = claimInternal(i.caller.toString())._1
   (actions, prologResult)
 }
 
 # callback for staking contract
 @Callable(i)
-func onStakeLand(addr: String) = {
-  if (i.caller != stakingContract) then throw("Permission denied") else
-  claimInternal(addr)
-}
-
-# callback for staking contract
-# only call for user's last land unstaked
-@Callable(i)
-func onUnstakeLand(addr: String) = {
+func onStakeUnstakeLand(addr: String) = {
   if (i.caller != stakingContract) then throw("Permission denied") else
   claimInternal(addr)
 }

@@ -11,6 +11,9 @@ let DEFAULTHP = 100
 let strengthToHpBase = 1_0391 # 1.0391 (4 decimals)
 let numPointsOnLevelUp = 3
 
+let requirements = ["Strength", "Accuracy", "Intellect", "Endurance", "Dexterity", 
+  "Level", "Health"]
+
 let charStrength = 0
 let charAccuracy = 1
 let charIntellect = 2
