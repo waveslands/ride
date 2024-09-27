@@ -1,0 +1,170 @@
+{-# STDLIB_VERSION 6 #-}
+{-# CONTENT_TYPE DAPP #-}
+{-# SCRIPT_TYPE ACCOUNT #-}
+{-# IMPORT common2.ride,wlglib2.ride #-}
+
+let adminsList = [
+  this.toString(),
+  match(chain) {
+    case base16'57' => "3P64qEVzuGzBJuYfDXYisFtokJChSRa8uja"
+    case base16'54' => "3MzUNHF52B4YSqy2shiRGVdHVLQuHmcDQCP"
+    case _ => throw("Unknown chain")
+  }
+]
+
+func walletInternal(userAddressOpt: String) = {
+  let addr = addressFromString(userAddressOpt)
+  let balance = if (addr.isDefined()) then addr.value().wavesBalance() else BalanceDetails(0, 0, 0, 0)
+  let wlgoldBalance = if (addr.isDefined()) then assetBalance(addr.value(), wlgAssetId) else 0
+  let customName = acres2Contract.getString(keyAddressToCustomName(userAddressOpt)).valueOrElse(userAddressOpt)
+  let refByKey = keyAddressRefBy(userAddressOpt)
+  let refBy = acres2Contract.getString(refByKey)
+  let refs = acres2Contract.getString(keyAddressReferrals(userAddressOpt)).valueOrElse("")
+  let lastTxId = acres2Contract.getString(keyLastTxIdByUser(userAddressOpt)).valueOrElse("")
+  let acresBalance = if (addr.isDefined()) then assetBalance(addr.value(), acresAssetId) else 0
+  let stakedAcres = acres2Contract.getInteger(keyAcresStakedAmtByUser(userAddressOpt)).valueOrElse(0)
+  let lvl = getLevelByAcres(acresBalance)
+  let fp = getFarmingPowers(userAddressOpt, acres2Contract)
+  [
+    "%s%s__customName__" + customName,
+    "%s%s__referredBy__" + refBy.valueOrElse(""),
+    "%s%s__referrals__" + refs,
+    "%s%s__lastTxId__" + lastTxId,
+    "%s%d__wavesBalance__" + balance.available.toString(),
+    "%s%d__wlgoldBalance__" + wlgoldBalance.toString(),
+    "%s%d__acresBalance__" + acresBalance.toString(),
+    "%s%d__stakedAcres__" + stakedAcres.toString(),
+    "%s%d__currentLvl__" + lvl.toString(),
+    "%s%d__userFarmingPower__" + fp[idxUserFP].toString(),
+    "%s%d__totalFarmingPower__" + fp[idxTotalFP].toString()
+  ]
+}
+
+
+func getAnyData(addr: Address, key: String) = {
+  let bool = addr.getBoolean(key)
+  if (bool.isDefined()) then bool.value() else
+
+  let bin = addr.getBinary(key)
+  if (bin.isDefined()) then bin.value() else
+  
+  let int = addr.getInteger(key)
+  if (int.isDefined()) then int.value() else
+  
+  addr.getString(key)
+}
+
+# Restrictions:
+#  MAX 10 functions
+#  function can have any number of any params, and return value of any type
+#
+# tuple items:
+#  (dApp, funcName, args) - for invokes
+# or:
+#  (address, key) - for data queries
+#
+# E.g.:
+# curl -X 'POST' 'https://nodes-testnet.wavesnodes.com/utils/script/evaluate/3MumkGGztCKAXpWDqxkddofqXSUbqQkvSJy' \
+# -H 'accept: application/json' -H 'Content-Type: application/json' \
+# -d '{"expr": "genericREADONLY([("3MyN19SDzDpXyEtabWvag2P5mkeFrdFVd4h", "supportedRewardAssets"), ("3Mxd5o7PwH76ZkN8zG4xwDLubEnbkaihKzi", "buyNsbtREADONLY", [1000000000])])
+func genericREADONLY(queries: List[(String, String, List[Any]) | (String, String)]) = {
+  #                                  addr   fname    args          addr    key
+  func call(acc: List[Any], query: (String, String, List[Any]) | (String, String)) = {
+    let addr = Address(fromBase58String(query._1))
+    let funcOrKey = query._2
+    let result = match (query) {
+      case inv: (String, String, List[Any]) => addr.invoke(funcOrKey, inv._3, [])
+      case _ => addr.getAnyData(funcOrKey)
+    }
+    acc :+ result
+  }
+
+  FOLD<10>(queries, [], call)
+}
+
+# pass all contracts addresses list in order of indices, except rest:
+# IdxCfgAcres2Dapp     = 1
+# IdxCfgWlgDapp        = 2
+# IdxCfgGovernanceDapp = 3
+# IdxCfgPuzzlePoolDapp = 4
+# IdxCfgInvestFundDapp = 5
+@Callable(i)
+func constructorV1(contracts: List[String]) = {
+  if (i.caller != this) then throw("permissions denied") else
+
+  func descriptor(acc: String, ignoredItem: String) = {
+    acc + "%s"
+  }
+  let descr = FOLD<10>(contracts, "", descriptor)
+
+  [StringEntry(keyRestCfg(), makeString(cons(descr, contracts), SEP)),
+    StringEntry(keyRest2Address(), this.toString())]
+}
+
+@Callable(i)
+func walletInfoREADONLY(userAddressOpt: String) = {
+  ([], walletInternal(userAddressOpt))
+}
+
+@Callable(i)
+func conversionInfoREADONLY(userAddressOpt: String) = {
+  let oldAcresAddress = acres2Contract.getStringValue(oldAcresContractKey).addressFromStringValue()
+  let (unstakedAcres, claimedAcres) = oldAcresAddress.invoke("unstakeAllAcresREADONLY", [userAddressOpt], []).asTuple2Ints()
+  let (acresFromPieces, acresFromRes, acresFromMat, acresFromProd) = acres2Contract.invoke("unstakeLandsREADONLY", [userAddressOpt], []).asTuple4Ints()
+  let oldStakingAddress = oldStakingContractStr.addressFromStringValue()
+  let duckAssetId = oldStakingAddress.getString(keyStakedDuckByOwner(userAddressOpt)).valueOrElse("")
+  let (acresFromDuckRes, acresFromDuckMat, acresFromDuckProd) = if (duckAssetId != "") then {
+    oldStakingAddress.invoke("unstakeDuckREADONLY", [duckAssetId, userAddressOpt], []).asTuple3Ints()
+  } else {
+    (0, 0, 0)
+  }
+
+  ([], [
+    "%s%d__unstakedAcres__" + unstakedAcres.toString(),
+    "%s%d__claimedAcres__" + claimedAcres.toString(),
+    "%s%d__acresFromPieces__" + acresFromPieces.toString(),
+    "%s%d__acresFromRes__" + acresFromRes.toString(),
+    "%s%d__acresFromMat__" + acresFromMat.toString(),
+    "%s%d__acresFromProd__" + acresFromProd.toString(),
+    "%s%d__acresFromDuckRes__" + acresFromDuckRes.toString(),
+    "%s%d__acresFromDuckMat__" + acresFromDuckMat.toString(),
+    "%s%d__acresFromDuckProd__" + acresFromDuckProd.toString()
+  ])
+}
+
+@Callable(i)
+func wlgStatsREADONLY(userAddrOpt: String) = {
+  let curStats = getWlgStats2(userAddrOpt, [rest2Contract, acres2Contract, wlgContract, puzzlePoolContract, investFundContract], usdtAssetId, 0)
+  ([], [
+    "%s%d__wlgAmount__" + curStats[ixWlgAmount].toString(),
+    "%s%d__wlgWlg__" + curStats[ixWlgWlg].toString(),
+    "%s%d__wlgPrice__" + curStats[ixWlgPrice].toString(),
+    "%s%d__usdtFunds__" + curStats[ixWlgFunds].toString(),
+    "%s%d__usdtActivity__" + curStats[ixWlgActivity].toString(),
+    "%s%d__usdtStaking__" + curStats[ixWlgAcres2].toString(),
+    "%s%d__usdtArbitrage__" + curStats[ixWlgArbitrage].toString(),
+    "%s%d__usdtPool__" + curStats[ixWlgPool].toString(),
+    "%s%d__wlgIssueTime__" + curStats[ixWlgIssueTime].toString(),
+    "%s%d__wlgLastTeamActTime__" + curStats[ixWlgLastTeamActTime].toString(),
+    "%s%d__wlgTeamTotal__" + curStats[ixWlgTeamTotal].toString(),
+    "%s%d__wlgTeamAmLeft__" + curStats[ixWlgTeamAmLeft].toString(),
+    "%s%d__wlgTeamAmAvailNow__" + curStats[ixWlgTeamAmAvailNow].toString(),
+    "%s%d__wlgTeamWlgold__" + curStats[ixWlgTeamWlgold].toString(),
+    "%s%d__wlgActTotal__" + curStats[ixWlgActTotal].toString(),
+    "%s%d__wlgActAmLeft__" + curStats[ixWlgActAmLeft].toString(),
+    "%s%d__wlgActAmAvailNow__" + curStats[ixWlgActAmAvailNow].toString(),
+    "%s%d__wlgActWlgold__" + curStats[ixWlgActWlgold].toString(),
+    "%s%d__wlgCurPeriod__" + curStats[ixWlgCurPeriod].toString(),
+    "%s%d__wlgAmLeftTotal__" + curStats[ixWlgAmLeftTotal].toString(),
+    "%s%d__wlgCurPeriodDistribution__" + curStats[ixWlgCurPeriodDistribution].toString(),
+    "%s%d__wlgLastUserTime__" + curStats[ixWlgLastUserTime].toString(),
+    "%s%d__wlgInvestFundTotal__" + curStats[ixWlgInvestFundAmount].toString(),
+    "%s%d__wlgUserAmAvailNow__" + curStats[ixWlgUserAmAvailNow].toString(),
+    "%s%d__wlgEffUserTime__" + curStats[ixWlgEffUserTime].toString(),
+    "%s%d__wlgIssue10AvailNow__" + curStats[ixWlgIssue10Amount].toString(),
+    "%s%d__wlgMarketingIssue10AvailNow__" + curStats[ixWlgMarketingIssue10Amount].toString(),
+    "%s%d__wlgTeamIssue10AvailNow__" + curStats[ixWlgTeamIssue10Amount].toString(),
+    "%s%d__wlgUserIssue10AvailNow__" + curStats[ixWlgUser10part].toString(),
+    "%s%d__wlgLastIssue10Time__" + curStats[ixWlgIssue10Time].toString()
+  ])
+}

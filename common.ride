@@ -3,10 +3,21 @@
 {-# CONTENT_TYPE LIBRARY #-}
 
 # kill switches
-let KSALLOWWLGOLD = true
-let KSALLOWXPLEVELS = true
+let KS_SEPARATE_PUBLIC_KEY = false
+let KS_ALLOW_BIG_INFRA_MERGE = false
+let KS_ALLOW_ROBO_DUCKS = false
+
+let DAY_MILLIS = 86_400_000 # 24*3600*1000
+let OLD_STAKING_DEADLINE = 1727740799000 # September 30, 2024 11:59:59 PM
 
 let chain = this.bytes.drop(1).take(1)
+let pub = match(chain) {
+  case base16'57' => if (KS_SEPARATE_PUBLIC_KEY) 
+    then base58'CWsMtTZC5BjjoL4Q1ayW4Wwb1ehGACQB6DrKyPgotKfm' # 3PGbvBkzsQn1V3mVj2koN7iJSNbjVywgypL
+    else base58'6LfPuKJjLgekmncBhMg2LZyMTNVzZBccXR28ySXm9uXD' # 3PHTdULuHAxVhs6UufJMthdjrzyFqALxdwM
+  case base16'54' => base58'6LfPuKJjLgekmncBhMg2LZyMTNVzZBccXR28ySXm9uXD' # 3N5SpX21R3R75Qo4eb3MwFFvW7TUzyhvavv
+  case _ => throw("Unknown chain")
+}
 let usdtAssetId = match(chain) {
   case base16'57' => base58'9wc3LXNA4TEBsXyKtoLE9mrbDD7WMHXvXrCjZvabLAsi'
   case base16'54' => base58'6mWwf9mZBjVgkC54idpyaZLQfAosD914wT8fGf2iiY63'
@@ -17,20 +28,39 @@ let defaultRestAddressStr = match(chain) {
   case base16'54' => "3MumkGGztCKAXpWDqxkddofqXSUbqQkvSJy"
   case _ => throw("Unknown chain")
 }
+let acres2AddressStr = match(chain) {
+  case base16'57' => "3P4UH3T9nXpMNpUmSmQjPmEz3G85t3zn6eA"
+  case base16'54' => "3NBPx1Fciu3JQNEGZ21jSnTdutLNGGBUSXh"
+  case _ => throw("Unknown chain")
+}
 let InfraUpgradeCostS = match(chain) {
   case base16'57' => 100_0000_0000 # (was 63.07198406) * L materials need to upgrade S land from (L-1) to L level
   case base16'54' => 1_0000_0000 # /100 for testnet
   case _ => throw("Unknown chain")
 }
 let arbitrageDelay = match(chain) {
-  case base16'57' => 600000 # 10*60*1000 = 10 minutes
+  case base16'57' => DAY_MILLIS
   case base16'54' => 60000 # 1 minute for testnet
   case _ => throw("Unknown chain")
 }
+let landCooldown = match(chain) {
+  case base16'57' => 21600000 # 6*60*60*1000 = 6 hours
+  case base16'54' => 600000 # 10 minutes for testnet
+  case _ => throw("Unknown chain")
+}
+let DELIVERY_PUNISHMENT = match(chain) {
+  case base16'57' => 10800000 # 3*60*60*1000 = 3 hours
+  case base16'54' => 900000 # 15 minutes for testnet
+  case _ => throw("Unknown chain")
+}
+let promo2MapKey = "promo2Map"
+func keyPromo2MapForRound(roundId: Int) = "promo2MapForRound__" + roundId.toString()
+func keyPromo3MapForRound(roundId: Int) = "promo3MapForRound__" + roundId.toString()
+func keyPromo4MapForRound(roundId: Int) = "promo4MapForRound__" + roundId.toString()
 
 let SEP = "__"
+let MULT5 = 100_000
 let MULT6 = 1_000_000
-let MULT7 = 10_000_000 # recipe materials are 1 decimal, but we need 8, so it is converting coeff
 let MULT8 = 1_0000_0000
 let MULT10 = 100_0000_0000
 let SSIZE = 25
@@ -39,6 +69,8 @@ let LSIZE = 225
 let XLSIZE = 400
 let XXLSIZE = 625
 let MINSHOPPAYMENT = 100000 # $0.1
+let ITER6 = [0, 1, 2, 3, 4, 5]
+let ITER20 = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
 
 func getStringOrFail(address: Address, key: String) = address.getString(key)
     .valueOrErrorMessage(makeString(["mandatory ", address.toString(), ".", key, " is not defined"], ""))
@@ -50,9 +82,13 @@ let IdxCfgEconomyDapp    = 2
 let IdxCfgGovernanceDapp = 3
 let IdxCfgWlgDapp        = 4
 let IdxCfgPuzzlePoolDapp = 5
+let IdxCfgInvestFundDapp = 6
+let IdxCfgTournamentDapp = 7
+let IdxCfgAcresDapp      = 8
 
 func keyRestCfg() = "%s__restConfig"
 func keyRestAddress() = "%s__restAddr"
+func keyRest2Address() = "%s__rest2Addr"
 
 func readRestCfgOrFail(rest: Address) = split_4C(rest.getStringOrFail(keyRestCfg()), SEP)
 func getContractAddressOrFail(restCfg: List[String], idx: Int) = restCfg[idx].addressFromString()
@@ -66,6 +102,9 @@ let economyContract = restCfg.getContractAddressOrFail(IdxCfgEconomyDapp)
 let govContract = restCfg.getContractAddressOrFail(IdxCfgGovernanceDapp)
 let wlgContract = restCfg.getContractAddressOrFail(IdxCfgWlgDapp)
 let puzzlePoolContract = restCfg.getContractAddressOrFail(IdxCfgPuzzlePoolDapp)
+let investFundContract = restCfg.getContractAddressOrFail(IdxCfgInvestFundDapp)
+let tournamentContract = restCfg.getContractAddressOrFail(IdxCfgTournamentDapp)
+let acresContract = restCfg.getContractAddressOrFail(IdxCfgAcresDapp)
 
 let recLandNum = 0
 let recLandSize = 1
@@ -73,13 +112,55 @@ let recTerrains = 2
 let recContinent = 3
 
 let wlgAssetIdKey = "wlg_assetId"
-let wlgAssetId = wlgContract.getBinary(wlgAssetIdKey).valueOrErrorMessage("Not initialized yet")
+let wlgAssetId = wlgContract.getBinary(wlgAssetIdKey).valueOrErrorMessage("WLGOLD is not issued yet")
+let acresIssuedAmountKey = "acresIssuedAmount"
+let acresAssetIdKey = "acresAssetId"
+let acresAssetId = acresContract.getBinary(acresAssetIdKey).valueOrErrorMessage("ACRES is not issued yet")
+let acresIdStr = acresAssetId.toBase58String()
+func keyAcresStakedTimeByUser(addr: String) = "acresStakedTimeByUser_" + addr
+
+let idxWlgAmount = 0
+let idxWlgPrice = 1
+let idxWlgFunds = 2
+let idxWlgEconomy = 3
+let idxWlgActivity = 4
+let idxWlgArbitrage = 5
+let idxWlgPool = 6
+let idxWlgIssueTime = 7
+let idxWlgLastTeamActTime = 8
+let idxWlgTeamTotal = 9
+let idxWlgTeamAmLeft = 10
+let idxWlgTeamAmAvailNow = 11
+let idxWlgTeamWlgold = 12
+let idxWlgActTotal = 13
+let idxWlgActAmLeft = 14
+let idxWlgActAmAvailNow = 15
+let idxWlgActWlgold = 16
+let idxWlgCurPeriod = 17
+let idxWlgAmLeftTotal = 18
+let idxWlgCurPeriodDistribution = 19
+let idxWlgLastUserTime = 20
+let idxWlgUserAmAvailNow = 21
+let idxWlgSLandDailyAmount = 22
+let idxWlgInvestFundAmount = 23
+let idxWlgUserTotalAvail = 24
+let idxWlgEffUserTime = 25
+let idxWlgBankWlgold = 26
 
 # data indices to access effective gWL array
 let IdxEffTotal = 0
 let IdxEffUser  = 1
+let idxEffAcresTotal = 2
+let idxEffAcresUser = 3
 
+let randomDelay = 2
+let SBUY = 1
+let EXPEDITION = 2
+let MERGE = 3
+
+func keyCommit(address: String) = "finishBlockFor_" + address # for random
 func keyResProportions() = "resTypesProportions"
+func keyResTypesByContinent(continent: String) = "resTypesByContinent_" + continent
 func keyStakedLandsByOwner(ownerAddr: String) = "stakedLandsByOwner_" + ownerAddr
 func keyStakedPiecesByOwner(ownerAddr: String) = "stakedPiecesByOwner_" + ownerAddr
 
@@ -107,6 +188,18 @@ func asBoolean(v: Any) = {
     case _ => throw("fail to cast into Boolean")
   }
 }
+func asTwoIntsTuple(val: Any) = {
+  match val {
+    case t2: (Int, Int) => t2
+    case _ => throw("fail to cast into (Int, Int)")
+  }
+}
+func asStringIntTuple(val: Any) = {
+  match val {
+    case t2: (String, Int) => t2
+    case _ => throw("fail to cast into (String, Int)")
+  }
+}
 func numPiecesBySize(landSize: String) = {
   match (landSize) {
     case "S" => SSIZE
@@ -117,6 +210,19 @@ func numPiecesBySize(landSize: String) = {
     case _ => throw("Unknown land size")
   }
 }
+
+func isDigit(s: String) = {
+  s.parseInt().isDefined()
+}
+
+func keyBlocked() = "contractsBlocked"
+func keyLastTxIdByUser(addr: String) = "lastTxIdByUser_" + addr
+
+# func prolog(stakingContract:Address, restContract: Address, i: Invocation) = {
+#   if (i.originCaller != restContract && stakingContract.getBoolean(keyBlocked()).valueOrElse(false)) then throw("Contracts are under maintenance") else
+#   if (this != stakingContract) stakingContract.invoke("saveLastTx", [], []).asInt() else
+#   StringEntry(keyLastTxIdByUser(i.originCaller.toString()), i.transactionId.toBase58String())
+# }
 
 # get staked land pieces [total, user]
 func getVotingPower(userAddrStrOrEmpty: String) = {
@@ -131,8 +237,43 @@ func getVotingPower(userAddrStrOrEmpty: String) = {
   [totalPower, usersPower]
 }
 
+# get staked land pieces and acres [totalPieces, userPieces, totalAcres, userAcres]
+func getVerboseVotingPower(userAddrStrOrEmpty: String) = {
+  let props = stakingContract.getString(keyResProportions()).valueOrElse("0_0_0_0_0_0").split("_")
+  
+  func adder(acc: Int, item: String) = acc + item.parseIntValue()
+  
+  let totalPieces = FOLD<6>(props, 0, adder)
+  let userPieces = stakingContract.getInteger(keyStakedPiecesByOwner(userAddrStrOrEmpty)).valueOrElse(0)
+
+  let totalAcres = acresContract.getInteger("acresStakedAmountTotal").valueOrElse(0)
+  let userAcres = acresContract.getInteger("acresStakedAmountByUser_" + userAddrStrOrEmpty).valueOrElse(0)
+
+  [totalPieces, userPieces, totalAcres, userAcres]
+}
+
 # print integer as fixed point string
 func fixedPoint(val: Int, decimals: Int) = {
   let tenPow = pow(10, 0, decimals, 0, 0, DOWN)
-  toString(val / tenPow) + "." + toString(val % tenPow)
+  let lowPart = toString(val % tenPow)
+  let zeroes = tenPow.toString().drop(1 + lowPart.size())
+  toString(val / tenPow) + "." + zeroes + lowPart
+}
+
+# left pad integer with zeroes to get total length = len 
+func padL(val: Int, len: Int) = {
+  let valS = val.toString()
+  let zeroes = pow(10, 0, len - valS.size(), 0, 0, DOWN).toString().drop(1)
+  zeroes + valS
+}
+
+func getRandomNumber(maxValue: Int, salt: ByteVector, entropy: ByteVector) = {
+  if (maxValue <= 0) then throw("maxValue should be > 0") else
+  let randomHash = sha256(salt + entropy)
+  toInt(randomHash) % maxValue
+}
+
+# old ACRES and NFT lands staking stop date
+func finalTime() = {
+  min([lastBlock.timestamp, OLD_STAKING_DEADLINE])
 }

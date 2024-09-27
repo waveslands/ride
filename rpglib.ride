@@ -10,6 +10,10 @@ let xpLevelRecipPow = 4000 # 0.4 (4 decimals)
 let DEFAULTHP = 100
 let strengthToHpBase = 1_0391 # 1.0391 (4 decimals)
 let numPointsOnLevelUp = 3
+# let robberyCostMin = 1_0000_0000 # 1 WLGOLD
+# let robberyCostIncrement = 100_0000_0000 # 100 WLGOLD
+# let robberyCooldownCoeff = 400 # 0.00000400 WLGOLD/ms
+let wlgBaseAmountXp = 1000_0000_0000 # 1 xp per 1000 WLGOLD per day
 
 let requirements = ["Strength", "Accuracy", "Intellect", "Endurance", "Dexterity", 
   "Level", "Health"]
@@ -20,46 +24,103 @@ let charIntellect = 2
 let charEndurance = 3
 let charDexterity = 4
 
+let segments = ["backpack", "back", "belt", "hands", "head", "body"]
+
+let segBackpack = 0
+let segBack = 1
+let segBelt = 2
+let segHands = 3
+let segHead = 4
+let segBody = 5
+let NUMSEGMENTS = 6
+let NUMMAINAUX = 2
+let MAXSLOTS = 2
+let MAXPRODINSLOT = 30
+
+# 5 land robbery states:
+# 0: land is free to rob
+# 1: land is locked (10 mins) for robbing
+# 2: land is cooling down after being locked, but not attacked (15 mins)
+# 3: land was robbed and lost the battle; cooldown is 12h
+# 4: land was robbed and defended successfully; cooldown is 6h
+let landRobStates = ["free", "locked", "afterLockCooldown", "robbedCooldown", "defendedCooldown"]
+let landRobCooldowns = [0, 600000, 900000, 43200000, 21600000]
+let MIN_RES_TO_ROB = 2000_0000 # 0.2 res
+let robIdxFree = 0
+let robIdxLocked = 1
+let robIdxAfterLock = 2
+let robIdxLandLoser = 3
+let robIdxLandWinner = 4
+
+# 2 duck robbery states (ducks have no cooldown, but instead they have progressive robbery cost):
+let duckRobStates = ["free", "preparingRob"]
+let duckIdxFree = 0
+let duckIdxPreparing = 1
+
+func keyDuckHealth(duckAssetId: String) = "duckHealth_" + duckAssetId
 func keyDuckChars(duckAssetId: String) = "duckChars_" + duckAssetId
 func keyDuckXP(duckAssetId: String) = "duckXP_" + duckAssetId
 func keyDuckLevel(duckAssetId: String) = "duckLevel_" + duckAssetId
 func keyDuckFreePoints(duckAssetId: String) = "duckFreePoints_" + duckAssetId
+func keyDuckEquipment(duckAssetId: String) = "duckEquipment_" + duckAssetId
 func keyUserXP(addr: String) = "userXP_" + addr
 func keyUserLevel(addr: String) = "userLevel_" + addr
 func keyUserFreePoints(addr: String) = "userFreePoints_" + addr
+func keySavedHealth(duckAssetId: String) = "savedHealth_" + duckAssetId
+func keySavedLocation(duckAssetId: String) = "savedLocation_" + duckAssetId # continent_locType_id
+func keyDuckBuffs(duckAssetId: String) = "duckBuffs_" + duckAssetId
+func keyLastRobberyTimeByDuck(duckAssetId: String) = "lastRobberyTime_" + duckAssetId
+# func keyLastRobberyCostByDuck(duckAssetId: String) = "lastRobberyCost_" + duckAssetId
+# func keyLandRobberyState(landAssetId: String) = "landRobberyState_" + landAssetId
+# func keyLandCooldownETA(landAssetId: String) = "landCooldownETA_" + landAssetId
+# func keyDuckRobberyState(duckAssetId: String) = "duckRobberyState_" + duckAssetId
+# func keyLockedLandByDuck(duckAssetId: String) = "lockedLandByDuck_" + duckAssetId
+func keyDuckRobberyCount(duckAssetId: String) = "totalRobberyCountByDuck_" + duckAssetId
+func keyUserRobberyCount(addr: String) = "userRobberyCount_" + addr
+func keyUserLastRobberyDay(addr: String) = "userLastRobberyDay_" + addr
+# counter for unique flight mission generation
+func keyDuckDeliveryCount(duckAssetId: String) = "totalDeliveryCountByDuck_" + duckAssetId
+func keyUserDeliveryCount(addr: String) = "userDeliveryCount_" + addr
+func keyUserLastDeliveryDay(addr: String) = "userLastDeliveryDay_" + addr
 
-let xpClaim = 10_0000 # Claim с земли   1 ед. ресурса  10   утке или аккаунту
+let xpClaim = 1_0000 # Claim с земли   1 ед. ресурса  1   утке или аккаунту
 
 # Перелет
-let xpSuccessFlight = 5_0000 # Успешный  1 шт  5    утке
-let xpFailFlight = 1_0000 # Неуспешный  1 шт  1    утке
+let xpSuccessFlight = 1_0000 # Успешный  1 шт  1    утке
+let xpFailFlight = 2000 # Неуспешный  1 шт  0.2    утке
+
+# Грабеж
+let xpSuccessRob = 1_0000 # Успешный  1 шт  1    утке
+let xpFailRob = 2000 # Неуспешный  1 шт  0.2    утке
 
 # Сделка
 #   Фабрика
-let xpTrade = 10_0000 # покупка/продажа/конвертация  1 ед. ресурса 10   утке
+let xpTrade = 1_0000 # покупка/продажа/конвертация  1 ед. ресурса/материала 1   утке
 
 #   Мануфактура 
-let xpCraft = 10_0000 # крафт 1 ед. материала  10   утке
+let xpCraft = 1_0000 # крафт 1 ед. продукта  1   утке
 
 #   Служба спасения
-let xpSellToEs = 10_0000 # продажа  1 ед. материала  10   утке
+let xpSellToEs = 1_0000 # продажа  1 ед. продукта  1   утке
 
 let xpCallES = 10_0000 # вызов 1 вызов  10   утке
 
 #   Магазин
-let xpShop = 10_0000 # покупка/продажа  1 ед. рес/мат/товара   10   аккаунту и утке
+let xpShop = 1_0000 # покупка/продажа  1 ед. рес/мат/товара   1   аккаунту и утке
 
 # Переименование
-let xpCustomName = 500_0000 # Компания/Земля/Утка  1 шт  500  аккаунту или утке
+let xpCustomName = 100_0000 # Компания/Земля/Утка  1 шт  100  аккаунту или утке
 
 # Земли
-let xpNewSLand = 5000_0000 # Экспедиция за материалы/Покупка за USDT   1 S   5000 утке/аккаунту
-let xpUpgradeInfra = 10_0000 # Upgrade Infra  1 ед. материала  10   утке (или аккаунту, если разрешить апгрейд со склада)
-let xpMerge = 1000_0000 # Merge  1 шт   1000 аккаунту
+let xpNewSLand = 500_0000 # Экспедиция за материалы/Покупка за USDT   1 S   500 утке/аккаунту
+let xpUpgradeInfra = 1_0000 # Upgrade Infra  1 ед. материала  1   утке (или аккаунту, если разрешить апгрейд со склада)
+let xpMerge = 100_0000 # Merge  1 шт   100 аккаунту
 
-let xpOnboard = 1000_0000 # Приход по реферальной ссылке 1 шт 1000 аккаунту в виде ONBOARD артефакта, его можно применить на данной утке однократно
+let xpOnboard = 100_0000 # Приход по реферальной ссылке 1 шт 100 аккаунту в виде ONBOARD артефакта, его можно применить на данной утке однократно
 
 let xpHeal = 1_0000 # Самолечение 1 аптечка любого уровня  1 утке
+
+let xpWlg = 1_0000 # Стейкинг 1000 WLGOLD в течение суток  1 аккаунту
 
 # XP for level
 func xpByLevel(level: Int) = {
@@ -77,4 +138,66 @@ func maxHealth(level: Int) = {
 func levelUp(currLevel: Int, newXP: Int) = {
   let newLevel = levelByXP(newXP)
   [newLevel, numPointsOnLevelUp * (newLevel - currLevel)]
+}
+
+func getDuckStats(stakingContract: Address, duckAssetId: String, buffEffect: Int, forceBuffs: Boolean) = {
+  let chars = stakingContract.getString(keyDuckChars(duckAssetId)).valueOrElse("0_0_0_0_0").split("_")
+  let lvl = stakingContract.getInteger(keyDuckLevel(duckAssetId)).valueOrElse(0)
+  let health = stakingContract.getInteger(keyDuckHealth(duckAssetId)).valueOrElse(maxHealth(lvl))
+  let stateBuffs = stakingContract.getString(keyDuckBuffs(duckAssetId)).valueOrElse("0_0_0_0_0").split("_")
+  [
+    chars[charStrength].parseIntValue(), # 0
+    chars[charAccuracy].parseIntValue(), # 1
+    chars[charIntellect].parseIntValue(), # 2
+    chars[charEndurance].parseIntValue(), # 3
+    chars[charDexterity].parseIntValue(), # 4
+    lvl, # 5
+    health] # 6
+    ++ if (forceBuffs) then
+      [buffEffect, buffEffect, buffEffect, buffEffect, buffEffect]
+    else [
+      stateBuffs[charStrength].parseIntValue(), # 7
+      stateBuffs[charAccuracy].parseIntValue(), # 8
+      stateBuffs[charIntellect].parseIntValue(), # 9
+      stateBuffs[charEndurance].parseIntValue(), # 10
+      stateBuffs[charDexterity].parseIntValue() # 11
+    ]
+}
+
+# func getRobberyData(stakingContract: Address, duckAssetId: String) = {
+#   let lastRobCost = stakingContract.getInteger(keyLastRobberyCostByDuck(duckAssetId)).valueOrElse(0)
+#   let lastRobTime = stakingContract.getInteger(keyLastRobberyTimeByDuck(duckAssetId)).valueOrElse(0)
+#   let now = lastBlock.timestamp
+#   let robCost = max([robberyCostMin, lastRobCost - robberyCooldownCoeff * (now - lastRobTime)])
+#   let duckState = stakingContract.getInteger(keyDuckRobberyState(duckAssetId)).valueOrElse(0)
+#   let lockedLand = stakingContract.getString(keyLockedLandByDuck(duckAssetId)).valueOrElse("")
+#   let landETA = stakingContract.getInteger(keyLandCooldownETA(lockedLand)).valueOrElse(0)
+#   (robCost, lastRobTime, duckState, lockedLand, landETA)
+# }
+
+# tanh(x) = (e²ˣ - 1) / (e²ˣ + 1)
+func tanh(v: Int) = {
+  let double = 2 * v
+  let exp2 = pow(2_71828183, 8, double, 8, 8, HALFUP)
+  fraction(exp2 - SCALE8, SCALE8, exp2 + SCALE8, HALFUP)
+}
+
+# P_avoid = 0.25 * tanh(Dexterity/200) + P_equip_base * (1 + 0.07 * Intellect / (1 + Intellect))
+func dodgeProbability(chars: List[String], buffs: List[String], equipmentPerc: Int) = {
+  let intel = chars[charIntellect].parseIntValue() + buffs[charIntellect].parseIntValue()
+  let dex = chars[charDexterity].parseIntValue() + buffs[charDexterity].parseIntValue()
+  let first8 = tanh(fraction(dex, SCALE8, 200)) / 4
+  let second8 = fraction(equipmentPerc, SCALE8 + fraction(700_0000, intel, 1 + intel, HALFUP), 100, HALFUP)
+  (first8 + second8) # returns 8 decimals total (percents with 6 decimals)
+}
+
+# DamageAbsorption = BaseAbsorb_equip * (1 + 0.14 * Intellect / (1 + Intellect)) + 0.1 * sqrt(Dexterity) + 0.2 * Endurance
+func damageAbsorption(chars: List[String], buffs: List[String], equipmentAbsor: Int) = {
+  let intel = chars[charIntellect].parseIntValue() + buffs[charIntellect].parseIntValue()
+  let endur = chars[charEndurance].parseIntValue() + buffs[charEndurance].parseIntValue()
+  let dex = chars[charDexterity].parseIntValue() + buffs[charDexterity].parseIntValue()
+  let first8 = equipmentAbsor * (SCALE8 + fraction(1400_0000, intel, 1 + intel, HALFUP))
+  let second8 = sqrt(dex, 0, 8, HALFUP) / 10
+  let third8 = SCALE8 / 5 * endur
+  (first8 + second8 + third8) # returns 8 decimals
 }

@@ -1,0 +1,99 @@
+{-# STDLIB_VERSION 6 #-}
+{-# CONTENT_TYPE DAPP #-}
+{-# SCRIPT_TYPE ACCOUNT #-}
+{-# IMPORT common.ride,landlib.ride,rpglib.ride,wlglib.ride #-}
+
+let BLACKLISTED1 = "3P2NGX4Q5nge1MCauwQW5aqYLdkccSGj1Ep_3P2xFAHW9yhyNohYozWd4HFhEXZu3bsNSoR_3P2yKaZ2gvn9Xe5tti81a7P9LZhHgjvToV9_3P37zQ3cf2ecu55RmJqEiGSivdzN9avt3m9_3P4az6dtzsvGCWFAxa94UdevKzXyEwxEiFG_3P4kZU6X3TTLFcSUe55JSy8BySqitcPgMBz_3P5hCxBEh3NgNizZhNBreyBSqtbhJYLkKPD_3P7HLvucy11yxyMJUwjzXFHHKMEDwi1EwfC_3P8JuaqH9PTQAv8D5HBGgQfKauLTYt2NQft_3P9gTDB4rtDEVbpX3asU63H4Zinh2EnTmZE_3P9iN3qrtfJicUVy7amZeVsetVD3vUMk8be_3PCa2BsAa6JBLirszQfV5r9fJrujfhwtwfP_3PD3i4XN8KtygcFx4ry5M7UGqdfH8VYvtRT_3PDEMnnJNc2kx9cPEmvVvhXUr8SvhANKhsa_3PDGE9tKQizaeZFeDDq5aYSv89nwYbfirpZ_3PDMKQTCrUPZECVXEJJ8m1sHtutSu1naSf1_3PGh2Qu6Yvx8GTCRRVNvBUVZLdaidYSaxo5_3PKkmAtbSK5D2hQdo1RfEg8eXyMbDcRUc92_3PLMnbxzssP8W8E8XjJ1RLBBg8UZL8Cz3P2_3PMuxo4PCAox9s4a7R1eszh4iqqu8gS7jHv_3PNrMtEQChw87WZU1JAJ7aGHykCa8TjnDNK_3PPuBXfWoBy3EEory7c7vgi9Usjka7o5tBj_3PQwyeyEhT4Y6aGAL6tg73aQWJtV1zRt3nR_3PRGDShuMGb84MJtTJvtTg8qDfswkYWcm3e"
+let PROMO1_AMOUNT = 4970178 # 0.04970178 ACRES
+
+func isBlacklistedPromo1(addr: String) = {
+  BLACKLISTED1.contains(addr)
+}
+
+func claimAcresInternal(addr: String, acresAmount: Int, lastClaimTime: Int) = {
+  let deltaTime = finalTime() - lastClaimTime
+  let availRes = fraction(deltaTime, DAILYRESBYPIECE * acresAmount, DAYMILLIS * MULT8)
+  let canGetUsdt = economyContract.invoke("sellResourcesWorldREADONLY", [availRes], []).asInt()
+  let gotUsdt = max([0, canGetUsdt])
+  gotUsdt * USDT2ACRES_MULTIPLIER
+}
+
+func claimInternal(addr: String, acresAmount: Int, lastClaimTime: Int) = {
+  let deltaTime = finalTime() - lastClaimTime
+  if (deltaTime < 0) then throw("Saved timestamp is in future, saved = " + lastClaimTime.toString() + ", final = " + finalTime().toString()) else
+  let availRes = fraction(deltaTime, DAILYRESBYPIECE * acresAmount, DAYMILLIS * MULT8)
+  let canGetUsdt = economyContract.invoke("sellResourcesWorldREADONLY", [availRes], []).asInt()
+  let gotUsdt = if (canGetUsdt <= 0) then 0
+    else economyContract.invoke("sellResourcesWorld", [addr, availRes], []).asTwoIntsTuple()._1 # (usdtLeft, statsResult)
+  gotUsdt * USDT2ACRES_MULTIPLIER
+}
+
+func unstakeAcresRO(amount: Int, address: String) = {
+  let timeKey = keyAcresStakedTimeByUser(address)
+  let claimedAcres = claimAcresInternal(address, amount, getInteger(timeKey).valueOrElse(0))
+  (amount, claimedAcres)
+}
+
+@Callable(i)
+func constructorV1(restAddr: String, unstakedPieces: Int) = {
+  if (i.caller != this) then throw("Permission denied") else
+  if (getBinary(acresAssetIdKey).isDefined()) then throw("Already initialized") else
+  let nftAcres = getVotingPower("")[IdxEffTotal] + unstakedPieces
+  let issuedAmount = MILLION6 - nftAcres * MULT8
+  let issue = Issue("ACRES", "WavesLands land acres investment token", issuedAmount, 8, false, unit, 0)
+  let assetId = issue.calculateAssetId()
+  [
+    issue,
+    IntegerEntry(acresIssuedAmountKey, issuedAmount),
+    BinaryEntry(acresAssetIdKey, assetId),
+    StringEntry(keyRestAddress(), restAddr)
+  ]
+}
+
+@Callable(i)
+func unstakeAcresCallback(amount: Int, address: String) = {
+  if (i.caller.toString() != acres2AddressStr) then throw("Permission denied") else
+  if (amount <= 0) then throw("Amount should be positive") else
+  let timeKey = keyAcresStakedTimeByUser(address)
+  let amountKey = keyAcresStakedAmountByUser(address)
+  let oldAcresAmount = getInteger(amountKey).valueOrElse(0)
+  if (amount > oldAcresAmount) then throw("You have only " + oldAcresAmount.fixedPoint(8) + " ACRES staked, tried to unstake " + amount.fixedPoint(8)) else
+  let lockedAmount = getInteger(keyAcresLockedAmountByUser(address)).valueOrElse(0)
+  let lockedETA = getInteger(keyAcresLockedEtaByUser(address)).valueOrElse(0)
+  let now = lastBlock.timestamp
+  let unstakableAmount = if (isBlacklistedPromo1(address)) then oldAcresAmount - lockedAmount - PROMO1_AMOUNT else oldAcresAmount - lockedAmount
+  if (now < lockedETA && amount > unstakableAmount) then throw("Only " + unstakableAmount.fixedPoint(8) + " ACRES can be unstaked now, wait until " + lockedETA.toString()) else
+  let oldTotal = getInteger(acresStakedTotalKey).valueOrElse(0)
+  let wlgResult = wlgContract.invoke("onStakeUnstakeLand", [address], [])
+  let claimedAcres = claimInternal(address, oldAcresAmount, getInteger(timeKey).valueOrElse(0))
+  ([IntegerEntry(timeKey, lastBlock.timestamp),
+    IntegerEntry(amountKey, oldAcresAmount - amount),
+    IntegerEntry(acresStakedTotalKey, oldTotal - amount),
+    ScriptTransfer(i.caller, amount + claimedAcres, acresAssetId)
+  ], (amount + claimedAcres, wlgResult))
+}
+
+@Callable(i)
+func unstakeAllAcresREADONLY(address: String) = {
+  let amount = getInteger(keyAcresStakedAmountByUser(address)).valueOrElse(0)
+  let unstakedWithClaimed = unstakeAcresRO(amount, address)
+  ([], unstakedWithClaimed) # (unstakedAcres, claimedAcres)
+}
+
+@Callable(i)
+func requestAcresCallback(amount: Int) = {
+  let caller = i.caller
+  if (caller.toString() != acres2AddressStr && caller != stakingContract) then throw("Permission denied") else
+  ([ScriptTransfer(caller, amount, acresAssetId)], amount)
+}
+
+@Callable(i)
+func claimAcresREADONLY(address: String) = {
+  let timeKey = keyAcresStakedTimeByUser(address)
+  let amountKey = keyAcresStakedAmountByUser(address)
+  let acresAmount = getInteger(amountKey).valueOrElse(0)
+  let lastTime = getInteger(timeKey).valueOrElse(0)
+  let claimedAcres = claimAcresInternal(address, acresAmount, lastTime)
+  
+  ([], [claimedAcres, lastTime])
+}

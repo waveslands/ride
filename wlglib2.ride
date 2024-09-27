@@ -1,0 +1,227 @@
+{-# STDLIB_VERSION 6 #-}
+{-# SCRIPT_TYPE ACCOUNT #-}
+{-# CONTENT_TYPE LIBRARY #-}
+
+# wlgold contract
+let M6_ = 1_000_000
+let M8_ = 1_0000_0000
+let MILL6 = 1000000_0000_0000 # 1 mil WLG tokens
+# let MARKETINGSHARE = 100000 # 10% 6 decimals
+let TEAM_SHARE = 200000 # 20% 6 decimals
+let ACTIVITY_SHARE = 100000 # 10% 6 decimals
+let PLAYER_SHARE = 400000 # 40% 6 decimals
+let YEAR_MILLIS = 31557600000 # 365.25*24*3600*1000
+let DAY_MS = 86_400_000 # 24*3600*1000
+let ISSUE10 = 10_0000_0000 # reissue 10 WLGOLD per day
+let PLAYERS10_SHARE = 800000 # 80% 6 decimals
+let MARKETING10_SHARE = 100000 # 10% 6 decimals
+let TEAM10_SHARE = 100000 # 10% 6 decimals
+let NEW_STAKING_START = 1727740800000 # September 30, 2024 12:00:00 AM; also start issuing 10 WLGOLD per day
+
+let marketingAddrKey = "marketingAddr"
+let teamAdrKey = "teamAddr"
+# let lastMarketingTimeKey = "lastClaimedTime_marketing"
+# let marketingAmountLeftKey = "marketingAmountLeft"
+let lastTeamTimKey = "lastClaimedTime_team"
+let teamAmtLeftKey = "teamAmountLeft"
+let lastActivitiesTimKey = "lastClaimedTime_activities"
+let actAmtLeftKey = "activitiesAmountLeft"
+let stakersAmtLeftKey = "stakersAmountLeft"
+func keyLastClaimTimeByUser(addr: String) = "lastClaimedTimeUser_" + addr
+func distrByPeriod(issuedAmount: Int, period: Int) = fraction(issuedAmount, PLAYER_SHARE * (period + 1), 6 * M6_) # periods 0, 1, 2
+let wlgIssue10TimeKey = "wlg_issue10Time"
+
+let wlgIssueTimKey = "wlg_issueTime"
+let wlgIssuedAmtKey = "wlg_issuedAmount"
+let zbIssuedAmtKey = "zbill_issuedAmount"
+
+func keyAcresStakedAmtByUser(addr: String) = "acresStakedAmountByUser_" + addr
+func keyFarmingPowerByUser(addr: String) = "farmingPowerByUser_" + addr
+let acresStakdTotalKey = "acresStakedAmountTotal"
+let totalFarmingPowerKey = "totalFarmingPower"
+
+let dapp2Rest       = 0
+let dapp2Staking    = 1 # acres2
+let dapp2Wlg        = 2
+let dapp2Puzzle     = 3
+let dapp2InvestFund = 4
+
+# 0.00000001 .. 10 - level 1
+# 10.00000001 .. 20 - level 2
+# 20.00000001 .. 40 - level 3
+# 40.00000001 .. 80 - level 4
+# 80.00000001 .. 150 - level 5
+# 150.00000001 .. 250 - level 6
+# 250.00000001 .. 400 - level 7
+# 400.00000001 .. 700 - level 8
+# 700.00000001 .. 1000 - level 9
+# >1000 - level 10
+let levels = [10, 20, 40, 80, 150, 250, 400, 700, 1000]
+
+func getLevelByAcres(acres: Int) = {
+  let acr = acres / M8_
+  func checker(acc: Int, item: Int) = if (acr < item) then acc else acc + 1
+  let idx = FOLD<10>(levels, 0, checker)
+  idx + 1
+}
+
+func getFarmingPowerByAcres(acres: Int) = {
+  acres * 20 * (getLevelByAcres(acres) + 4)
+}
+
+func getFarmingPowers(userAddrStrOrEmpty: String, acres2Contract: Address) = {
+  let totalFP = acres2Contract.getInteger(totalFarmingPowerKey).valueOrElse(0)
+  let userAcres = acres2Contract.getInteger(keyAcresStakedAmtByUser(userAddrStrOrEmpty)).valueOrElse(0)
+  let userFP = getFarmingPowerByAcres(userAcres)
+
+  [totalFP, userFP]
+}
+
+let idxTotalFP = 0
+let idxUserFP = 1
+
+let ixWlgAmount = 0
+let ixWlgWlg = 1
+let ixWlgPrice = 2
+let ixWlgFunds = 3
+let ixWlgActivity = 4
+let ixWlgAcres2 = 5
+let ixWlgArbitrage = 6
+let ixWlgPool = 7
+let ixWlgIssueTime = 8
+let ixWlgLastTeamActTime = 9 
+let ixWlgTeamTotal = 10
+let ixWlgTeamAmLeft = 11
+let ixWlgTeamAmAvailNow = 12
+let ixWlgTeamWlgold = 13
+let ixWlgActTotal = 14
+let ixWlgActAmLeft = 15
+let ixWlgActAmAvailNow = 16
+let ixWlgActWlgold = 17
+let ixWlgCurPeriod = 18
+let ixWlgAmLeftTotal = 19
+let ixWlgCurPeriodDistribution = 20
+let ixWlgLastUserTime = 21
+let ixWlgInvestFundAmount = 22
+let ixWlgUserAmAvailNow = 23
+let ixWlgEffUserTime = 24
+let ixWlgIssue10Amount = 25
+let ixWlgMarketingIssue10Amount = 26
+let ixWlgTeamIssue10Amount = 27
+let ixWlgUser10part = 28
+let ixWlgIssue10Time = 29
+
+# usdtBalanceCorrection needed if USDT payment was attached to call, because RIDE v5+ counts payment amount as already added to balance
+func getWlgStats2(userAddrOpt: String, contracts: List[Address], usdtId: ByteVector, usdtBalanceCorrection: Int) = {
+  let issuedAmount = contracts[dapp2Wlg].getInteger(wlgIssuedAmtKey).valueOrErrorMessage("WLGOLD is not issued yet")
+  let restUsd = assetBalance(contracts[dapp2Rest], usdtId)
+  let wlgUsd = assetBalance(contracts[dapp2Wlg], usdtId) - usdtBalanceCorrection # needed if payment is already added during invoke
+  let puzzleUsd = assetBalance(contracts[dapp2Puzzle], usdtId)
+  let acres2Usd = assetBalance(contracts[dapp2Staking], usdtId)
+  let investFndContract = contracts[dapp2InvestFund]
+  let investFundTotal = assetBalance(investFndContract, usdtId) + investFndContract.getInteger(zbIssuedAmtKey).valueOrElse(0)
+  let totalFundsUsd = acres2Usd + wlgUsd + investFundTotal # + restUsd + puzzleUsd
+
+  let wlgId = contracts[dapp2Wlg].getBinary("wlg_assetId").valueOrErrorMessage("Not initialized yet")
+  let now = lastBlock.timestamp
+  let issueTime = contracts[dapp2Wlg].getInteger(wlgIssueTimKey).valueOrErrorMessage("Not initialized")
+  let wlgWlg = assetBalance(contracts[dapp2Wlg], wlgId)
+
+  let teamTotal = fraction(issuedAmount, TEAM_SHARE, M6_)
+  let teamAmountLeft = contracts[dapp2Wlg].getInteger(teamAmtLeftKey).valueOrElse(teamTotal)
+  let lastTeamTime = contracts[dapp2Wlg].getInteger(lastTeamTimKey).valueOrElse(issueTime)
+  let teamAddr = contracts[dapp2Wlg].getString(teamAdrKey).value().addressFromStringValue()
+  let teamAmountAvailableNow = min([fraction(teamTotal, now - lastTeamTime, 3 * YEAR_MILLIS), teamAmountLeft])
+  let teamWlgold = assetBalance(teamAddr, wlgId)
+
+  let actTotal = fraction(issuedAmount, ACTIVITY_SHARE, M6_)
+  let actAmountLeft = contracts[dapp2Wlg].getInteger(actAmtLeftKey).valueOrElse(actTotal)
+  let lastActivitiesTime = contracts[dapp2Wlg].getInteger(lastActivitiesTimKey).valueOrElse(issueTime)
+  let actAmountAvailableNow = min([fraction(actTotal, now - lastActivitiesTime, 3 * YEAR_MILLIS), actAmountLeft])
+  let actWlgold = assetBalance(contracts[dapp2Rest], wlgId)
+  
+  let lastUserTime = contracts[dapp2Wlg].getInteger(keyLastClaimTimeByUser(userAddrOpt)).valueOrElse(issueTime)
+  let lastUserPeriod = (lastUserTime - issueTime) / YEAR_MILLIS
+  let nowLimited = min([now, issueTime + 3 * YEAR_MILLIS])
+  let curPeriod = min([(now - issueTime) / YEAR_MILLIS, 2])
+  let eff = getFarmingPowers(userAddrOpt, contracts[dapp2Staking])
+  let curPeriodDistribution = distrByPeriod(issuedAmount, curPeriod)
+  # TODO: add issuing of 10 WLGOLD daily
+  let (userAvailable, effLastTime) = # temporal part
+    if (lastUserPeriod == curPeriod) then {
+      let a0 = fraction(curPeriodDistribution, nowLimited - lastUserTime, YEAR_MILLIS)
+      let effTime = nowLimited
+      (a0, effTime)
+    } else if (lastUserPeriod == curPeriod - 1) then {
+      let a1 = fraction(distrByPeriod(issuedAmount, curPeriod-1), issueTime + YEAR_MILLIS * curPeriod - lastUserTime, YEAR_MILLIS)
+      let a0 = fraction(curPeriodDistribution, nowLimited - (issueTime + YEAR_MILLIS * curPeriod), YEAR_MILLIS)
+      let avail = a1 + a0
+      let effTime = if (avail <= a1) then 
+        lastUserTime + fraction(YEAR_MILLIS, avail, distrByPeriod(issuedAmount, curPeriod-1)) else 
+        issueTime + YEAR_MILLIS * curPeriod + fraction(YEAR_MILLIS, avail - a1, curPeriodDistribution)
+      (avail, effTime)
+    } else { # lastUserPeriod == curPeriod - 2
+      let a2 = fraction(distrByPeriod(issuedAmount, curPeriod-2), issueTime + YEAR_MILLIS * (curPeriod-1) - lastUserTime, YEAR_MILLIS)
+      let a1 = distrByPeriod(issuedAmount, curPeriod-1)
+      let a0 = fraction(curPeriodDistribution, nowLimited - (issueTime + YEAR_MILLIS * curPeriod), YEAR_MILLIS)
+      let avail = a2 + a1 + a0
+      let effTime = if (avail <= a2) then
+        lastUserTime + fraction(YEAR_MILLIS, avail, distrByPeriod(issuedAmount, curPeriod-2)) else if (avail <= a2 + a1) then
+        issueTime + YEAR_MILLIS * (curPeriod-1) + fraction(YEAR_MILLIS, avail - a2, distrByPeriod(issuedAmount, curPeriod-1)) else
+        issueTime + YEAR_MILLIS * curPeriod + fraction(YEAR_MILLIS, avail - a2 - a1, curPeriodDistribution)
+      (avail, effTime)
+    }
+  let amountLeftTotal = contracts[dapp2Wlg].getInteger(stakersAmtLeftKey).valueOrElse(0)
+  # this value is still needed to sum up DAO payments
+  let unrobbedUser = if (eff[idxTotalFP] != 0) then fraction(userAvailable, eff[idxUserFP], eff[idxTotalFP]) else 0
+
+  let lastIssue10Time = contracts[dapp2Wlg].getInteger(wlgIssue10TimeKey).valueOrElse(NEW_STAKING_START)
+  let issue10Amount = fraction(ISSUE10, max([now - lastIssue10Time, 0]), DAY_MS)
+  let marketingIssue10Amount = fraction(issue10Amount, MARKETING10_SHARE, M6_)
+  let teamIssue10Amount = fraction(issue10Amount, TEAM10_SHARE, M6_)
+  let user10Interval = max([now - max([NEW_STAKING_START, lastUserTime]), 0])
+  let user10part = if (eff[idxTotalFP] != 0) then 
+    fraction(
+      fraction(
+        fraction(ISSUE10, user10Interval, DAY_MS), # totalIssue10Amount since lastUserTime
+        eff[idxUserFP], # this user's share of FP
+        eff[idxTotalFP]
+      ), 
+      PLAYERS10_SHARE, # 80% of it goes to stakers
+      M6_
+    )
+    else 0
+  let newIssue10Time = max([NEW_STAKING_START, now])
+
+  [ issuedAmount,                              # 0
+    wlgWlg,                                    # 1 WLGOLD balance on wlgContract
+    fraction(totalFundsUsd, M8_, issuedAmount), # 2 index WLGOLD price 
+    totalFundsUsd,                             # 3
+    restUsd,                                   # 4
+    acres2Usd,                                 # 5
+    wlgUsd,                                    # 6
+    puzzleUsd,                                 # 7
+    issueTime,                                 # 8
+    lastTeamTime,                              # 9 team and activities time
+    teamTotal,                                 # 10
+    teamAmountLeft,                            # 11
+    teamAmountAvailableNow,                    # 12
+    teamWlgold,                                # 13
+    actTotal,                                  # 14
+    actAmountLeft,                             # 15
+    actAmountAvailableNow,                     # 16
+    actWlgold,                                 # 17
+    curPeriod,                                 # 18
+    amountLeftTotal,                           # 19
+    curPeriodDistribution,                     # 20
+    lastUserTime,                              # 21
+    investFundTotal,                           # 22
+    unrobbedUser,                              # 23 UserTotalAvail = userAmount (no robbery)
+    effLastTime,                               # 24
+    issue10Amount,                             # 25
+    marketingIssue10Amount,                    # 26
+    teamIssue10Amount,                         # 27
+    user10part,                                # 28
+    newIssue10Time                             # 29
+  ]
+}

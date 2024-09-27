@@ -5,6 +5,15 @@
 
 let USDTPRIZEPART = 500_000 # 0.5
 
+let adminsList = [
+  this.toString(),
+  match(chain) {
+    case base16'57' => "3P64qEVzuGzBJuYfDXYisFtokJChSRa8uja"
+    case base16'54' => "3MzUNHF52B4YSqy2shiRGVdHVLQuHmcDQCP"
+    case _ => throw("Unknown chain")
+  }
+]
+
 func asListIntCompacted(val: Any) = {
   match val {
     case valAnyList: List[Any] => {
@@ -29,6 +38,13 @@ func asSplitResult(val: Any) = {
   }
 }
 
+func asCancelOrderResult(val: Any) = {
+  match val {
+    case t2: (Boolean, String) => t2
+    case _ => throw("fail to cast into (Boolean, String)")
+  }
+}
+
 func walletInternal(userAddressOpt: String) = {
   let addr = addressFromString(userAddressOpt)
   let balance = if (addr.isDefined()) then addr.value().wavesBalance() else BalanceDetails(0, 0, 0, 0)
@@ -43,10 +59,18 @@ func walletInternal(userAddressOpt: String) = {
   let xp = stakingContract.getInteger(keyUserXP(userAddressOpt)).valueOrElse(0)
   let lvl = stakingContract.getInteger(keyUserLevel(userAddressOpt)).valueOrElse(0)
   let freePoints = stakingContract.getInteger(keyUserFreePoints(userAddressOpt)).valueOrElse(0)
+  let virtWlgData = wlgContract.invoke("checkWlgXpREADONLY", [userAddressOpt], []).exactAs[List[Any]] # [virtLevel, virtPoints, newXP]
+  let stakedWlgold = wlgContract.getInteger(keyWlgStakedAmountByUser(userAddressOpt)).valueOrElse(0)
 
   let onboard = if (refBy.isDefined()) then ARTONBOARD + (
     if (addr.isDefined() && stakingContract.getString(keyOnboardArtDuckActivatedBy(userAddressOpt)).isDefined()) then ":1" else ":0"
   ) else ""
+  
+  let acresBalance = if (addr.isDefined()) then assetBalance(addr.value(), acresAssetId) else 0
+  let stakedAcres = acresContract.getInteger(keyAcresStakedAmountByUser(userAddressOpt)).valueOrElse(0)
+
+  let delivCount = stakingContract.getInteger(keyUserDeliveryCount(userAddressOpt)).valueOrElse(0)
+  let lastDelivDay = stakingContract.getInteger(keyUserLastDeliveryDay(userAddressOpt)).valueOrElse(0)
   [
     "%s%s__customName__" + customName,
     "%s%s__referredBy__" + refBy.valueOrElse(""),
@@ -56,10 +80,20 @@ func walletInternal(userAddressOpt: String) = {
     "%s%d__wlgoldBalance__" + wlgoldBalance.toString(),
     "%s%d__usdtBalance__" + usdtBalance.toString(),
     "%s%d__stakedPieces__" + pieces.toString(),
+    "%s%d__acresBalance__" + acresBalance.toString(),
+    "%s%d__stakedAcres__" + stakedAcres.toString(),
     "%s%d__currentXp__" + xp.toString(),
     "%s%d__currentLvl__" + lvl.toString(),
     "%s%d__pointsToDistribute__" + freePoints.toString(),
-    "%s%s__walletArtefacts__" + onboard # "0" - доступен, но не активирован, "1" - активирован
+    "%s%s__walletArtefacts__" + onboard, # "0" - доступен, но не активирован, "1" - активирован
+    "%s%d__stakedWlgold__" + stakedWlgold.toString(),
+    "%s%d__virtLevel__" + virtWlgData[0].exactAs[Int].toString(),
+    "%s%d__virtPoints__" + virtWlgData[1].exactAs[Int].toString(),
+    "%s%d__virtXP__" + virtWlgData[2].exactAs[Int].toString(),
+    "%s%d__userDeliveryCount__" + delivCount.toString(),
+    "%s%d__userLastDeliveryDay__" + lastDelivDay.toString(),
+    "%s%d__lockedAcres__" + acresContract.getInteger(keyAcresLockedAmountByUser(userAddressOpt)).valueOrElse(0).toString(),
+    "%s%d__ETALockedAcres__" + acresContract.getInteger(keyAcresLockedEtaByUser(userAddressOpt)).valueOrElse(0).toString()
   ]
 }
 
@@ -89,10 +123,12 @@ func getWarehouse(whKey: String, landIndex: Int, infraLevel: Int) = {
 }
 
 func duckInfoTuple(duckAssetId: String) = {
+  let maxHP = maxHealth(stakingContract.getInteger(keyDuckLevel(duckAssetId)).valueOrElse(0))
+
   (stakingContract.getInteger(keyStakedTimeByAssetId(duckAssetId)).valueOrElse(-1), # stakedTime
     assetInfo(duckAssetId.fromBase58String()).value().name, # name
     stakingContract.getString(keyDuckLocation(duckAssetId)).valueOrElse(""), # location
-    stakingContract.getInteger(keyDuckHealth(duckAssetId)).valueOrElse(-1), # health
+    stakingContract.getInteger(keyDuckHealth(duckAssetId)).valueOrElse(maxHP), # health
     stakingContract.invoke("getBackpackREADONLY", [duckAssetId], []).asString() # backpack
   )
 }
@@ -103,6 +139,11 @@ func duckInfoArray(duckAssetId: String, owner: String, duckInf: (Int, String, St
   let xp = stakingContract.getInteger(keyDuckXP(duckAssetId)).valueOrElse(0)
   let lvl = stakingContract.getInteger(keyDuckLevel(duckAssetId)).valueOrElse(0)
   let freePoints = stakingContract.getInteger(keyDuckFreePoints(duckAssetId)).valueOrElse(0)
+  let equipm = stakingContract.getString(keyDuckEquipment(duckAssetId)).valueOrElse(";_;_;_;_;_;")
+  let buffs = stakingContract.getString(keyDuckBuffs(duckAssetId)).valueOrElse("0_0_0_0_0")
+  # let (robCost, lastRobTime, duckState, lockedLand, landETA) = getRobberyData(stakingContract, duckAssetId)
+  let deliveryCount = stakingContract.getInteger(keyDuckDeliveryCount(duckAssetId)).valueOrElse(0)
+  let robberyCount = stakingContract.getInteger(keyDuckRobberyCount(duckAssetId)).valueOrElse(0)
   [
     "%s%s__assetId__" + duckAssetId,
     "%s%s__owner__" + owner,
@@ -116,7 +157,16 @@ func duckInfoArray(duckAssetId: String, owner: String, duckInf: (Int, String, St
     "%s%d__currentXp__" + xp.toString(),
     "%s%d__currentLvl__" + lvl.toString(),
     "%s%d__pointsToDistribute__" + freePoints.toString(),
-    "%s%s__backPack__" + duckInf._5
+    "%s%s__backPack__" + duckInf._5,
+    "%s%s__equipment__" + equipm,
+    "%s%s__buffs__" + buffs,
+    # "%s%d__robberyCost__" + robCost.toString(),
+    # "%s%d__robberyTime__" + lastRobTime.toString(),
+    # "%s%s__robberyState__" + duckRobStates[duckState],
+    # "%s%s__robberyLastLand__" + lockedLand,
+    # "%s%d__robberyLastLandReleaseTime__" + landETA.toString(),
+    "%s%d__totalRobberyCount__" + robberyCount.toString(),
+    "%s%d__totalDeliveryCount__" + deliveryCount.toString()
   ]
 }
 
@@ -135,6 +185,9 @@ func landInfoArray(landAssetId: String, owner: String, stakedTime: Int) = {
   else
     (stakingContract.invoke("splitByGlobalWeightsREADONLY", [needMat], []).asListIntCompacted(), "")
   let customName = stakingContract.getString(keyLandAssetIdToCustomName(landAssetId)).valueOrElse(d[recContinent] + "-" + d[recLandNum])
+  # let fort = stakingContract.getString(keyFortificationsByLand(landAssetId)).valueOrElse(":0_15:0_18:0")
+  # let state = stakingContract.getInteger(keyLandRobberyState(landAssetId)).valueOrElse(0)
+  # let cooldownETA = stakingContract.getInteger(keyLandCooldownETA(landAssetId)).valueOrElse(0)
   [
     "%s%s__assetId__" + landAssetId,
     "%s%s__owner__" + owner,
@@ -148,6 +201,9 @@ func landInfoArray(landAssetId: String, owner: String, stakedTime: Int) = {
     "%s%s__landArtefacts__PRESALE:" + productivity._2.toString(),
     "%s%s__warehouse__" + getWarehouse(keyWarehouseByLand(landAssetId), pieces / SSIZE, productivity._1).makeString(":"),
     "%s%s__landOrder__" + economyContract.getString(keyOrderByLand(landAssetId)).valueOrElse("0@0_0@0_0@0_0@0_0@0_0@0:0@0_0@0_0@0_0@0_0@0_0@0:")
+    # "%s%s__fortifications__" + fort,
+    # "%s%s__robberyState__" + landRobStates[state],
+    # "%s%d__canBeRobbedAfter__" + cooldownETA.toString()
   ]
 }
 
@@ -165,12 +221,83 @@ func landOrderInfoArray(landAssetId: String, owner: String) = {
   ]
 }
 
+func slotEffect(slot: String) = {
+  if (slot == "") then 0 else {
+    let slot0 = slot.split(",")[0]
+    if (slot0 == "") then 0 else {
+      let prod = slot0.split(":")
+      if (prod[1] == "" || prod[1].parseIntValue() == 0) then 0 else productionMatrix[prod[0].parseIntValue()].split("_")[rIdxEffect].parseIntValue()
+    }
+  }
+}
+
+func tourStatsCommon(tournamentId: Int) = {
+  let tData = tournamentContract.getTourData(tournamentId)
+  let static = tData[idxStatic]
+  let dynamic = tData[idxDynamic]
+  let leaders = if (dynamic[tDynamicLeaders] == "") then " " else dynamic[tDynamicLeaders]
+  let scoreBoard = tournamentContract.getString(keyScoreBoardByTour(tournamentId)).valueOrElse("")
+  let numGrands = if (static.size() > tStaticNumGrands) then static[tStaticNumGrands] else "0"
+  let prizeFund = if (static.size() > tStaticPrizeFund) then static[tStaticPrizeFund] else "0"
+  let assetId = if (static.size() > tStaticAsset) then static[tStaticAsset].fromBase58String() else wlgAssetId
+  let assetName = assetId.assetInfo().valueOrErrorMessage("No assetInfo available").name
+  [
+    "%s%s__tournamentStaticData__" + makeString([static[tStaticRegisterCost], static[tStaticAttemptCost], static[tStaticStart], static[tStaticEnd], numGrands, prizeFund, assetName], "_"),
+    "%s%s__tournamentDynamicData__" + makeString_2C([dynamic[tDynamicStatus], leaders, dynamic[tDynamicWinResult], dynamic[tDynamicTotalRegCount], dynamic[tDynamicTotalAttempts]], "_"),
+    "%s%s__tournamentScoreBoard__" + scoreBoard
+  ]
+}
+
+func getAnyData(addr: Address, key: String) = {
+  let bool = addr.getBoolean(key)
+  if (bool.isDefined()) then bool.value() else
+
+  let bin = addr.getBinary(key)
+  if (bin.isDefined()) then bin.value() else
+  
+  let int = addr.getInteger(key)
+  if (int.isDefined()) then int.value() else
+  
+  addr.getString(key)
+}
+
+# Restrictions:
+#  MAX 10 functions
+#  function can have any number of any params, and return value of any type
+#
+# tuple items:
+#  (dApp, funcName, args) - for invokes
+# or:
+#  (address, key) - for data queries
+#
+# E.g.:
+# curl -X 'POST' 'https://nodes-testnet.wavesnodes.com/utils/script/evaluate/3MumkGGztCKAXpWDqxkddofqXSUbqQkvSJy' \
+# -H 'accept: application/json' -H 'Content-Type: application/json' \
+# -d '{"expr": "genericREADONLY([("3MyN19SDzDpXyEtabWvag2P5mkeFrdFVd4h", "supportedRewardAssets"), ("3Mxd5o7PwH76ZkN8zG4xwDLubEnbkaihKzi", "buyNsbtREADONLY", [1000000000])])
+func genericREADONLY(queries: List[(String, String, List[Any]) | (String, String)]) = {
+  #                                  addr   fname    args          addr    key
+  func call(acc: List[Any], query: (String, String, List[Any]) | (String, String)) = {
+    let addr = Address(fromBase58String(query._1))
+    let funcOrKey = query._2
+    let result = match (query) {
+      case inv: (String, String, List[Any]) => addr.invoke(funcOrKey, inv._3, [])
+      case _ => addr.getAnyData(funcOrKey)
+    }
+    acc :+ result
+  }
+
+  FOLD<10>(queries, [], call)
+}
+
 # pass all contracts list in order of indices, except rest:
 # IdxCfgStakingDapp    = 1
 # IdxCfgEconomyDapp    = 2
 # IdxCfgGovernanceDapp = 3
 # IdxCfgWlgDapp        = 4
 # IdxCfgPuzzlePoolDapp = 5
+# IdxCfgInvestFundDapp = 6
+# IdxCfgTournamentDapp = 7
+# IdxCfgAcresDapp      = 8
 @Callable(i)
 func constructorV1(contracts: List[String]) = {
   if (i.caller != this) then throw("permissions denied") else
@@ -202,8 +329,22 @@ func duckByOwnerInfoREADONLY(userAddress: String) = {
 @Callable(i)
 func duckByAssetIdInfoREADONLY(duckAssetId: String) = {
   let owner = stakingContract.getString(keyDuckIdToOwner(duckAssetId))
-  let duckInf = duckInfoTuple(duckAssetId)
   ([], duckInfoArray(duckAssetId, if (owner.isDefined()) then owner.value() else "", duckInfoTuple(duckAssetId)))
+}
+
+# up to 100 ducks
+@Callable(i)
+func ducksByIdsInfoREADONLY(duckAssetIds: List[String]) = {
+
+  func oneDuck(acc: List[List[String]], duckAssetId: String) = {
+    if (duckAssetId == "") then throw("duckAssetId is required") else
+    let stakedTime = stakingContract.getInteger(keyStakedTimeByAssetId(duckAssetId)).valueOrElse(-1)
+    let owner = if (stakedTime > 0) then stakingContract.getString(keyDuckIdToOwner(duckAssetId)).value() else ""
+    acc :+ duckInfoArray(duckAssetId, owner, duckInfoTuple(duckAssetId))
+  }
+  let r = FOLD<100>(duckAssetIds, [], oneDuck)
+
+  ([], r)
 }
 
 @Callable(i)
@@ -278,7 +419,7 @@ func cancelWarehouseOrders(landAssetIds: List[String]) = {
 
   func oneLand(a: Boolean, landAssetId: String) = {
     if (landAssetId == "") then throw("landAssetId is required") else
-    let c = economyContract.invoke("setWarehouseOrder", ["0@0_0@0_0@0_0@0_0@0_0@0:0@0_0@0_0@0_0@0_0@0_0@0:", landAssetId], []).asBoolean()
+    let c = economyContract.invoke("setWarehouseOrder", ["0@0_0@0_0@0_0@0_0@0_0@0:0@0_0@0_0@0_0@0_0@0_0@0:", landAssetId], []).asCancelOrderResult()._1
     (a || c) && !(a && c)
   }
   let r = FOLD<30>(landAssetIds, false, oneLand)
@@ -286,31 +427,56 @@ func cancelWarehouseOrders(landAssetIds: List[String]) = {
 }
 
 # Pass up to 25 lands to fix warehouse format
-@Callable(i)
-func fixWarehouseFormats(landAssetIds: List[String]) = {
-  if (i.caller != this) then throw("permission denied") else
+# @Callable(i)
+# func fixWarehouseFormats(landAssetIds: List[String]) = {
+#   if (i.caller != this) then throw("permission denied") else
 
-  func oneLand(acc: Int, landAssetId: String) = {
-    if (landAssetId == "") then throw("landAssetId is required") else
-    acc + stakingContract.invoke("fixWarehouseFormat", [landAssetId], []).asString().size()
-  }
-  let r = FOLD<25>(landAssetIds, 0, oneLand)
-  ([], r)
-}
+#   func oneLand(acc: Int, landAssetId: String) = {
+#     if (landAssetId == "") then throw("landAssetId is required") else
+#     acc + stakingContract.invoke("fixWarehouseFormat", [landAssetId], []).asString().size()
+#   }
+#   let r = FOLD<25>(landAssetIds, 0, oneLand)
+#   ([], r)
+# }
 
 # Pass up to 16 user addresses to fix staked pieces
+# @Callable(i)
+# func fixStakedPieces(users: List[String]) = {
+#   if (i.caller != this) then throw("permission denied") else
+
+#   func oneUser(acc: Int, addr: String) = {
+#     if (addr == "") then throw("address is required") else
+#     acc + stakingContract.invoke("fixStakedPieces", [addr], []).asInt()
+#   }
+#   let r = FOLD<16>(users, 0, oneUser)
+#   ([], r)
+# }
+
+# Pass up to 100 lands to fix terrains sizes by continents
+# @Callable(i)
+# func fixStakedLands(landAssetIds: List[String]) = {
+#   let caller = i.caller.toString()
+#   if (!adminsList.containsElement(caller)) then throw("Permission denied") else
+#   let r = stakingContract.invoke("fixContinentProportions", [landAssetIds], []).asInt()
+#   ([], r)
+# }
+
+# Pass up to 20 user addresses to distribute acres
 @Callable(i)
-func fixStakedPieces(users: List[String]) = {
-  if (i.caller != this) then throw("permission denied") else
+func distributeLockedAcres(users: List[String], amount: Int, lockDays: Int) = {
+  if (i.caller != this && i.callerPublicKey != pub) then throw("Permission denied") else
+  if (amount <= 0) then throw("amount should be positive") else
+  if (lockDays < 0) then throw("lockDays should be non-negative") else
 
   func oneUser(acc: Int, addr: String) = {
     if (addr == "") then throw("address is required") else
-    acc + stakingContract.invoke("fixStakedPieces", [addr], []).asInt()
+    acc + acresContract.invoke("sendLockedAcres", [addr, amount, lockDays], []).asInt()
   }
-  let r = FOLD<16>(users, 0, oneUser)
-  ([], r)
+  let totalAcres = FOLD<20>(users, 0, oneUser)
+  ([], totalAcres)
 }
 
+# callback for staking contract
 @Callable(i)
 func sendUsdtPrize(userAddress: String) = {
   if (i.caller != stakingContract) then throw("permission denied") else
@@ -327,16 +493,16 @@ func sendUsdtPrize(userAddress: String) = {
 @Callable(i)
 func getEmergencyServiceDataREADONLY() = {
   let existStr = economyContract.getString(keyEsWarehouse())
-  let existAmounts = if (existStr.isDefined()) then existStr.value().split("_") else []
+  let existAmounts = if (existStr.isDefined()) then existStr.value().split_4C("_") else []
 
   func singleProd(acc: (List[String], Int), recipeStr: String) = {
     let n = acc._2 # product index < productionMatrix.size()
     let recipe = recipeStr.split("_")
     let maxAmount = if (n == 0) then ESMAXPACKAGES * PRODUCTPKGSIZE else 0 # medkit1 only
     let existAmount = if (size(existAmounts) > n) then existAmounts[n].parseIntValue() else 0
-    let totalMat = getRecipeMaterials(recipe)
-    let buyPrice = fraction(totalMat * ESBUYCOEF, RESOURCEPRICEMIN, 10 * PRODUCTPKGSIZE)
-    let sellPrice = fraction(totalMat * ESSELLCOEF, RESOURCEPRICEMIN, 10 * PRODUCTPKGSIZE)
+    let totalMat = getRecipeMaterials(recipe) # 8 decimals
+    let buyPrice = fraction(totalMat * ESBUYCOEF, RESOURCEPRICEMIN, MULT8 * PRODUCTPKGSIZE) # 8 dec + 6 dec
+    let sellPrice = fraction(totalMat * ESSELLCOEF, RESOURCEPRICEMIN, MULT8 * PRODUCTPKGSIZE)
 
     let y = makeString([maxAmount.toString(), existAmount.toString(), buyPrice.toString(), sellPrice.toString()], "_")
     (acc._1 :+ y, n + 1)
@@ -348,33 +514,122 @@ func getEmergencyServiceDataREADONLY() = {
 
 @Callable(i)
 func wlgStatsREADONLY(userAddrOpt: String) = {
-  let curStats = getWlgStats(userAddrOpt, [restContract, stakingContract, economyContract, govContract, wlgContract, puzzlePoolContract], usdtAssetId, 0)
+  let curStats = getWlgStats(userAddrOpt, [restContract, stakingContract, economyContract, wlgContract, puzzlePoolContract, investFundContract, acresContract], usdtAssetId, 0, MULT6)
   ([], [
-    "%s%s%d__wlgAmount__" + curStats[idxWlgAmount].toString(),
-    "%s%s%d__wlgPrice__" + curStats[idxWlgPrice].toString(),
-    "%s%s%d__usdtFunds__" + curStats[idxWlgFunds].toString(),
-    "%s%s%d__usdtEconomy__" + curStats[idxWlgEconomy].toString(),
-    "%s%s%d__usdtActivity__" + curStats[idxWlgActivity].toString(),
-    "%s%s%d__usdtArbitrage__" + curStats[idxWlgArbitrage].toString(),
-    "%s%s%d__usdtPool__" + curStats[idxWlgPool].toString(),
-    "%s%s%d__wlgIssueTime__" + curStats[idxWlgIssueTime].toString(),
-    "%s%s%d__wlgLastMarketingTeamActTime__" + curStats[idxWlgLastMTATime].toString(),
-    "%s%s%d__wlgMarketingTotal__" + curStats[idxWlgMarketingTotal].toString(),
-    "%s%s%d__wlgMarketingAmLeft__" + curStats[idxWlgMarketingAmLeft].toString(),
-    "%s%s%d__wlgMarketingAmAvailNow__" + curStats[idxWlgMarketingAmAvailNow].toString(),
-    "%s%s%d__wlgMarketingWlgold__" + curStats[idxWlgMarketingWlgold].toString(),
-    "%s%s%d__wlgTeamTotal__" + curStats[idxWlgTeamTotal].toString(),
-    "%s%s%d__wlgTeamAmLeft__" + curStats[idxWlgTeamAmLeft].toString(),
-    "%s%s%d__wlgTeamAmAvailNow__" + curStats[idxWlgTeamAmAvailNow].toString(),
-    "%s%s%d__wlgTeamWlgold__" + curStats[idxWlgTeamWlgold].toString(),
-    "%s%s%d__wlgActTotal__" + curStats[idxWlgActTotal].toString(),
-    "%s%s%d__wlgActAmLeft__" + curStats[idxWlgActAmLeft].toString(),
-    "%s%s%d__wlgActAmAvailNow__" + curStats[idxWlgActAmAvailNow].toString(),
-    "%s%s%d__wlgActWlgold__" + curStats[idxWlgActWlgold].toString(),
-    "%s%s%d__wlgCurPeriod__" + curStats[idxWlgCurPeriod].toString(),
-    "%s%s%d__wlgAmLeftTotal__" + curStats[idxWlgAmLeftTotal].toString(),
-    "%s%s%d__wlgCurPeriodDistribution__" + curStats[idxWlgCurPeriodDistribution].toString(),
-    "%s%s%d__wlgLastUserTime__" + curStats[idxWlgLastUserTime].toString(),
-    "%s%s%d__wlgUserAmAvailNow__" + curStats[idxWlgUserAmAvailNow].toString()
+    "%s%d__wlgAmount__" + curStats[idxWlgAmount].toString(),
+    "%s%d__wlgPrice__" + curStats[idxWlgPrice].toString(),
+    "%s%d__usdtFunds__" + curStats[idxWlgFunds].toString(),
+    "%s%d__usdtEconomy__" + curStats[idxWlgEconomy].toString(),
+    "%s%d__usdtActivity__" + curStats[idxWlgActivity].toString(),
+    "%s%d__usdtArbitrage__" + curStats[idxWlgArbitrage].toString(),
+    "%s%d__usdtPool__" + curStats[idxWlgPool].toString(),
+    "%s%d__wlgIssueTime__" + curStats[idxWlgIssueTime].toString(),
+    "%s%d__wlgLastMarketingTeamActTime__" + curStats[idxWlgLastTeamActTime].toString(),
+    "%s%d__wlgTeamTotal__" + curStats[idxWlgTeamTotal].toString(),
+    "%s%d__wlgTeamAmLeft__" + curStats[idxWlgTeamAmLeft].toString(),
+    "%s%d__wlgTeamAmAvailNow__" + curStats[idxWlgTeamAmAvailNow].toString(),
+    "%s%d__wlgTeamWlgold__" + curStats[idxWlgTeamWlgold].toString(),
+    "%s%d__wlgActTotal__" + curStats[idxWlgActTotal].toString(),
+    "%s%d__wlgActAmLeft__" + curStats[idxWlgActAmLeft].toString(),
+    "%s%d__wlgActAmAvailNow__" + curStats[idxWlgActAmAvailNow].toString(),
+    "%s%d__wlgActWlgold__" + curStats[idxWlgActWlgold].toString(),
+    "%s%d__wlgCurPeriod__" + curStats[idxWlgCurPeriod].toString(),
+    "%s%d__wlgAmLeftTotal__" + curStats[idxWlgAmLeftTotal].toString(),
+    "%s%d__wlgCurPeriodDistribution__" + curStats[idxWlgCurPeriodDistribution].toString(),
+    "%s%d__wlgLastUserTime__" + curStats[idxWlgLastUserTime].toString(),
+    "%s%d__wlgUserAmAvailNow__" + curStats[idxWlgUserAmAvailNow].toString(),
+    "%s%d__wlgGuestSLandDaily__" + curStats[idxWlgSLandDailyAmount].toString(),
+    "%s%d__wlgInvestFundTotal__" + curStats[idxWlgInvestFundAmount].toString(),
+    "%s%d__wlgUserTotalAvail__" + curStats[idxWlgUserTotalAvail].toString(),
+    "%s%d__wlgEffUserTime__" + curStats[idxWlgEffUserTime].toString(),
+    "%s%d__wlgBankWlgold__" + curStats[idxWlgBankWlgold].toString()
+  ])
+}
+
+@Callable(i)
+func tournamentStatsREADONLY(tournamentId: Int) = {
+  ([], tourStatsCommon(tournamentId))
+}
+
+@Callable(i)
+func lastTournamentStatsREADONLY() = {
+  let tournamentId = tournamentContract.getInteger(lastTourIdKey).valueOrElse(0)
+  ([], ("%s%s__lastTournamentId__" + tournamentId.toString()) :: tourStatsCommon(tournamentId))
+}
+
+@Callable(i)
+func tournamentDuckStatsREADONLY(tId: Int, duckAssetId: String) = {
+  let isDuckReg = tournamentContract.getBoolean(keyIsRegisteredByTourAndDuck(tId, duckAssetId)).valueOrElse(false)
+  let lastDuckAttempt = tournamentContract.getInteger(keyLastAttemptByTourAndDuck(tId, duckAssetId)).valueOrElse(-1)
+  let bestDuckResult = tournamentContract.getInteger(keyBestResultByTourAndDuck(tId, duckAssetId)).valueOrElse(0)
+  let bestDuckTx = tournamentContract.getString(keyBestTxByTourAndDuck(tId, duckAssetId)).valueOrElse("")
+  let isAwarded = tournamentContract.getBoolean(keyIsAwardedByTourAndDuck(tId, duckAssetId)).valueOrElse(false)
+  ([], [
+    "%s%s__tournamentDuckStats__" + makeString([isDuckReg.toString(), lastDuckAttempt.toString(), bestDuckResult.toString(), bestDuckTx, isAwarded.toString()], "_")
+  ])
+}
+
+@Callable(i)
+func duckStatsCalculatorREADONLY(duckAssetId: String) = {
+  let chars = stakingContract.getString(keyDuckChars(duckAssetId)).valueOrElse("0_0_0_0_0").split("_")
+  let buffs = stakingContract.getString(keyDuckBuffs(duckAssetId)).valueOrElse("0_0_0_0_0").split("_")
+  # equipment.split("_") => list of 6 segments ['backpack', 'back', 'belt', 'hands', 'head', 'body']
+  # segment.split(";") => list of [mainSlots, auxSlots]
+  # {mainSlots|auxSlots}.split(",") => [slot0(, slot1)]
+  # slot.split(":") => [productIdx, count]
+  let equipm = stakingContract.getString(keyDuckEquipment(duckAssetId)).valueOrElse(";_;_;_;_;_;").split("_")
+  let equipmentPerc = slotEffect(equipm[segBack].split(";")[1]) # auxSlots: "09:26" or ","
+  let equipmentAbsor = slotEffect(equipm[segBelt].split(";")[0]) # mainSlots: "12:27" or ","
+  let dodge = dodgeProbability(chars, buffs, equipmentPerc)
+  let absorb = damageAbsorption(chars, buffs, equipmentAbsor)
+  ([], [
+    "%s%d__dodgeProbability__" + dodge.toString(),
+    "%s%d__damageAbsorption__" + absorb.toString()
+  ])
+}
+
+@Callable(i)
+func customDuckStatsCalculatorREADONLY(chars: List[String], buffs: List[String], equipmentPerc: Int, equipmentAbsor: Int) = {
+  let dodge = dodgeProbability(chars, buffs, equipmentPerc)
+  let absorb = damageAbsorption(chars, buffs, equipmentAbsor)
+  ([], [
+    "%s%d__dodgeProbability__" + dodge.toString(),
+    "%s%d__damageAbsorption__" + absorb.toString()
+  ])
+}
+
+@Callable(i)
+func acresStatsREADONLY(userAddrOpt: String) = {
+  let userClaim = acresContract.invoke("claimAcresREADONLY", [userAddrOpt], []).asAnyList()
+  let userClaimable = userClaim[0].asInt()
+  let userLastTime = userClaim[1].asInt()
+  ([], [
+    "%s%d__acresIssuedTotal__" + acresContract.getInteger(acresIssuedAmountKey).valueOrElse(0).toString(),
+    "%s%d__acresUnsold__" + assetBalance(acresContract, acresAssetId).toString(),
+    "%s%d__acresStakedTotal__" + acresContract.getInteger(acresStakedTotalKey).valueOrElse(0).toString(),
+    "%s%d__acresStakedByUser__" + acresContract.getInteger(keyAcresStakedAmountByUser(userAddrOpt)).valueOrElse(0).toString(),
+    "%s%d__acresClaimableByUser__" + userClaimable.toString(),
+    "%s%d__acresLastClaimTimeByUser__" + userLastTime.toString(),
+    "%s%d__acresLockedByUser__" + acresContract.getInteger(keyAcresLockedAmountByUser(userAddrOpt)).valueOrElse(0).toString(),
+    "%s%d__acresLockedEtaByUser__" + acresContract.getInteger(keyAcresLockedEtaByUser(userAddrOpt)).valueOrElse(0).toString()
+  ])
+}
+
+@Callable(i)
+func testV4() = {
+  ([], genericREADONLY([]))
+}
+
+@Callable(i)
+func promo2StatsREADONLY() = {
+  let result = acresContract.getString(promo2MapKey).valueOrElse("")
+  ([], if (result == "") then [] else result.split_51C("_"))
+}
+
+@Callable(i)
+func promo2StatsByUserREADONLY(addr: String) = {
+  let isAwarded = acresContract.getBoolean(keyIsAwardedByPromoAndUser(2, addr)).valueOrElse(false)
+  ([], [
+    "%s%s%b__promo2AddressAwarded__" + addr + "__" + isAwarded.toString()
   ])
 }

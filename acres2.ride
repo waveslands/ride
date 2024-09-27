@@ -1,0 +1,211 @@
+{-# STDLIB_VERSION 6 #-}
+{-# CONTENT_TYPE DAPP #-}
+{-# SCRIPT_TYPE ACCOUNT #-}
+{-# IMPORT common2.ride,wlglib2.ride #-}
+
+func prolog(i: Invocation) = {
+  if (i.originCaller != rest2Contract && getBoolean(keyBlocked()).valueOrElse(false)) then throw("Contracts are under maintenance") else
+  [StringEntry(keyLastTxIdByUser(i.originCaller.toString()), i.transactionId.toBase58String())]
+}
+
+func stakeAcresInternal(amt: Int, address: String) = {
+  strict wlgResult = wlgContract.invoke("onStakeUnstakeLand", [address], [])
+  let now = lastBlock.timestamp
+  let timeKey = keyAcresStakedTimeByUser(address)
+  let amountKey = keyAcresStakedAmtByUser(address)
+  let newAcresAmount = getInteger(amountKey).valueOrElse(0) + amt
+  let oldTotal = getInteger(acresStakdTotalKey).valueOrElse(0)
+  let userFpKey = keyFarmingPowerByUser(address)
+  let oldFp = getInteger(userFpKey).valueOrElse(0)
+  let newFp = getFarmingPowerByAcres(newAcresAmount)
+  let oldTotalFp = getInteger(totalFarmingPowerKey).valueOrElse(0)
+
+  ([IntegerEntry(timeKey, lastBlock.timestamp),
+    IntegerEntry(amountKey, newAcresAmount),
+    IntegerEntry(acresStakdTotalKey, oldTotal + amt),
+    IntegerEntry(userFpKey, newFp),
+    IntegerEntry(totalFarmingPowerKey, oldTotalFp - oldFp + newFp)
+    ], wlgResult)
+    # (actions, wlgClaimedAmount)
+}
+
+# usdtBalanceCorrection needed if USDT payment was attached to call, because RIDE v5+ counts payment amount as already added to balance
+func getWlgPrice(usdtBalanceCorrection: Int) = {
+  let issuedAmount = wlgContract.getInteger(wlgIssuedAmtKey).valueOrErrorMessage("WLGOLD is not issued yet")
+  let wlgUsd = assetBalance(wlgContract, usdtAssetId)
+  let acres2Usd = assetBalance(acres2Contract, usdtAssetId) - usdtBalanceCorrection
+  let investFundTotal = assetBalance(investFundContract, usdtAssetId) + investFundContract.getInteger(zbIssuedAmtKey).valueOrElse(0)
+  let totalFundsUsd = acres2Usd + wlgUsd + investFundTotal
+  fraction(totalFundsUsd, MULT8, issuedAmount)
+}
+
+@Callable(i)
+func constructorV1(rest2Addr: String, oldAcrContract: String) = {
+  if (i.caller != this) then throw("Permission denied") else
+  let oldAcrContAddr = oldAcrContract.addressFromStringValue();
+  [
+    IntegerEntry(acresIssuedAmountKey, oldAcrContAddr.getIntegerValue(acresIssuedAmountKey)),
+    BinaryEntry(acresAssetIdKey, oldAcrContAddr.getBinaryValue(acresAssetIdKey)),
+    StringEntry(keyRest2Address(), rest2Addr),
+    StringEntry(oldAcresContractKey, oldAcrContract)
+  ]
+}
+
+@Callable(i)
+func saveInteger(key: String, amount: Int) = {
+  if (i.caller != this) then throw("saveInteger is not public method") else
+  [IntegerEntry(key, amount)]
+}
+
+@Callable(i)
+func setBlocked(isBlocked: Boolean) = {
+  if (i.caller != this) then throw("permission denied") else
+  [BooleanEntry(keyBlocked(), isBlocked)]
+}
+
+@Callable(i)
+func unstakeAcres(amount: Int) = {
+  let prologActions = prolog(i)
+  if (amount <= 0) then throw("Amount should be positive") else
+  let address = i.caller.toString()
+  if (i.payments.size() != 0) then throw("No payments required") else
+
+  let timeKey = keyAcresStakedTimeByUser(address)
+  let amountKey = keyAcresStakedAmtByUser(address)
+  let oldAcresAmount = getInteger(amountKey).valueOrElse(0)
+  if (amount > oldAcresAmount) then throw("You have only " + oldAcresAmount.fixedPoint(8) + " ACRES staked, tried to unstake " + amount.fixedPoint(8)) else
+  let oldTotal = getInteger(acresStakdTotalKey).valueOrElse(0)
+  let wlgResult = wlgContract.invoke("onStakeUnstakeLand", [address], [])
+
+  let newAcresAmount = oldAcresAmount - amount
+  let userFpKey = keyFarmingPowerByUser(address)
+  let oldFp = getInteger(userFpKey).valueOrElse(0)
+  let newFp = getFarmingPowerByAcres(newAcresAmount)
+  let oldTotalFp = getInteger(totalFarmingPowerKey).valueOrElse(0)
+
+  ([IntegerEntry(timeKey, lastBlock.timestamp),
+    IntegerEntry(amountKey, oldAcresAmount - amount),
+    IntegerEntry(acresStakdTotalKey, oldTotal - amount),
+    IntegerEntry(userFpKey, newFp),
+    IntegerEntry(totalFarmingPowerKey, oldTotalFp - oldFp + newFp),
+    ScriptTransfer(i.caller, amount, acresAssetId)] ++ prologActions, wlgResult)
+}
+
+@Callable(i)
+func stakeAcres() = {
+  let prologActions = prolog(i)
+  let address = i.caller.toString()
+  if (i.payments.size() != 1) then throw("exactly 1 payment must be attached") else
+  let pmt = i.payments[0]
+  let amt = pmt.amount
+  if (!pmt.assetId.isDefined() || pmt.assetId.value() != acresAssetId) then throw("ACRES payments only!") else
+  let (actions, wlgClaimedAmount) = stakeAcresInternal(amt, address)
+  (actions ++ prologActions, wlgClaimedAmount)
+}
+
+# fixed price 10 USDT = 1 ACRES, equivalent amount of WLGOLD are burned
+@Callable(i)
+func buyAcres() = {
+  let prologActions = prolog(i)
+  if (i.payments.size() != 1) then throw("exactly 1 payment must be attached") else
+  let pmt = i.payments[0]
+  let usdtAmount = pmt.amount
+  if (!pmt.assetId.isDefined() || pmt.assetId.value() != usdtAssetId) then throw("USDT payments only!") else
+  if (usdtAmount < MULT6) then throw("Min payment should be " + MULT6.fixedPoint(6) + " USDT") else
+  let acresAmount = usdtAmount * USDT2ACRES_MULTIPLIER
+  let wlgAmount = fraction(usdtAmount, MULT8, getWlgPrice(usdtAmount))
+  let oldAcresAddress = getStringValue(oldAcresContractKey).addressFromStringValue()
+  strict req = oldAcresAddress.invoke("requestAcresCallback", [acresAmount], [])
+  let wlgRemain = wlgContract.invoke("burnWlgold", [wlgAmount], []).asInt()
+
+  ([ScriptTransfer(i.caller, acresAmount, acresAssetId)] ++ prologActions, wlgRemain)
+}
+
+# 50% USDT from ACRES contract goes to user
+@Callable(i)
+func sellAcres() = {
+  let prologActions = prolog(i)
+  if (i.payments.size() != 1) then throw("exactly 1 payment must be attached") else
+  let pmt = i.payments[0]
+  let acresAmount = pmt.amount
+  if (!pmt.assetId.isDefined() || pmt.assetId.value() != acresAssetId) then throw("ACRES payments only!") else
+  if (acresAmount < MULT7) then throw("Min payment should be " + MULT7.fixedPoint(8) + " ACRES") else
+  let usdtAmount = acresAmount / USDT2ACRES_MULTIPLIER / 2
+  ([ScriptTransfer(i.caller, usdtAmount, usdtAssetId)] ++ prologActions, usdtAmount)
+}
+
+# unstake all ACRES from old staking contract
+# unstake all NFT lands, ducks, remove all resources, material, production from warehouses
+# convert everything to ACRES, stake them to arces2 contract
+# issue bonus NFT for FPOWER10
+@Callable(i)
+func convertOldStakes() = {
+  let address = i.caller.toString()
+  if (i.payments.size() != 0) then throw("No payments required") else
+
+  let oldAcresAddress = getStringValue(oldAcresContractKey).addressFromStringValue()
+
+  let amount = oldAcresAddress.getInteger(keyAcresStakedAmtByUser(address)).valueOrElse(0)
+  let gotAcres0 = if (amount > 0) then 
+    oldAcresAddress.invoke("unstakeAcresCallback", [amount, address], []).asTuple2Ints() else (0, 0) # (acres, wlg)
+  
+  let oldStakingAddress = oldStakingContractStr.addressFromStringValue()
+
+  let landsStr = oldStakingAddress.getString(keyStakedLandsByOwner(address))
+  let landsResult = if (landsStr.isDefined()) then {
+    let lands = split_51C(landsStr.value(), "_")
+    # acc: (acresAmount, res, mat, prod)
+    func oneLand(acc: (Int, Int, Int, Int), landAssetId: String) = {
+      if (landAssetId == "") then throw("landAssetId is required") else
+      let r = oldStakingAddress.invoke("unstakeLandCallback", [landAssetId, address], []).asTuple5Ints()
+      (acc._1 + r._1, acc._2 + r._2, acc._3 + r._3, acc._4 + r._4)
+    }
+    # (acresFromPieces: Int, acresFromRes: Int, acresFromMat: Int, acresFromProd: Int, wlgResult: Int)
+    let rr = FOLD<100>(lands, (0, 0, 0, 0), oneLand)
+    strict finalize = oldStakingAddress.invoke("unstakeLandsFinalizeCallback", [address], [])
+    strict req = oldAcresAddress.invoke("requestAcresCallback", [rr._1 + rr._2 + rr._3 + rr._4], [])
+    # issue bonusNFT
+    let issue = Issue("FPOWER10", "FarmingPower +10% NFT for WavesLands game", 1, 0, false)
+    (rr._1, rr._2, rr._3, rr._4, [issue, ScriptTransfer(i.caller, 1, calculateAssetId(issue))])
+  } else (0, 0, 0, 0, [])
+
+  # process duck staked
+  let duckAssetId = oldStakingAddress.getString(keyStakedDuckByOwner(address)).valueOrElse("")
+  let duckResult = if (duckAssetId != "") then {
+    oldStakingAddress.invoke("unstakeDuckCallback", [duckAssetId, address], []).asTuple3Ints()
+  } else {
+    (0, 0, 0)
+  }
+  let x = stakeAcresInternal(gotAcres0._1
+    + landsResult._1 + landsResult._2 + landsResult._3 + landsResult._4
+    + duckResult._1 + duckResult._2 + duckResult._3, address) # (actions, wlgResult)
+
+  (landsResult._5 ++ x._1, x._2)
+}
+
+@Callable(i)
+func unstakeLandsREADONLY(address: String) = {
+  let oldStakingAddress = oldStakingContractStr.addressFromStringValue()
+
+  let landsStr = oldStakingAddress.getString(keyStakedLandsByOwner(address))
+  let landsResult = if (landsStr.isDefined()) then {
+    let lands = split_51C(landsStr.value(), "_")
+    # acc: (acresAmount, res, mat, prod)
+    func oneLand(acc: (Int, Int, Int, Int), landAssetId: String) = {
+      if (landAssetId == "") then throw("landAssetId is required") else
+      let r = oldStakingAddress.invoke("unstakeLandREADONLY", [landAssetId, address], []).asTuple4Ints()
+      (acc._1 + r._1, acc._2 + r._2, acc._3 + r._3, acc._4 + r._4)
+    }
+    # (acresFromPieces: Int, acresFromRes: Int, acresFromMat: Int, acresFromProd: Int)
+    FOLD<100>(lands, (0, 0, 0, 0), oneLand)
+  } else (0, 0, 0, 0)
+
+  ([], landsResult)
+}
+
+@Callable(i)
+func stakeAcresCallback(addr: String) = {
+  if (i.caller != oldStakingContractStr.addressFromStringValue()) then throw("Permission denied") else
+
+  stakeAcresInternal(i.payments[0].amount, addr) # (actions, wlgResult)
+}

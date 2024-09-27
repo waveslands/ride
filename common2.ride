@@ -1,0 +1,162 @@
+{-# STDLIB_VERSION 6 #-}
+{-# SCRIPT_TYPE ACCOUNT #-}
+{-# CONTENT_TYPE LIBRARY #-}
+
+# kill switches
+# ...
+
+let SEP = "__"
+let MULT6 = 1_000_000
+let MULT7 = 10_000_000
+let MULT8 = 1_0000_0000
+let E8 = 2_7182_8183
+let MINSHOPPAYMENT = 100000 # $0.1
+let DAY_MILLIS = 86_400_000 # 24*3600*1000
+let USDT2ACRES_MULTIPLIER = 10 # 10_000_000 USDT * USDT2ACRES_MULTIPLIER = 1_0000_0000 ACRES
+let chain = this.bytes.drop(1).take(1)
+let usdtAssetId = match(chain) {
+  case base16'57' => base58'9wc3LXNA4TEBsXyKtoLE9mrbDD7WMHXvXrCjZvabLAsi'
+  case base16'54' => base58'6mWwf9mZBjVgkC54idpyaZLQfAosD914wT8fGf2iiY63'
+  case _ => throw("Unknown chain")
+}
+let defaultRest2AddressStr = match(chain) {
+  case base16'57' => "3PFwYta8biEz31zpeFe5DJK8wE5trSpQVF8"
+  case base16'54' => "3N7UuYar6264P58FBhVWKPQAh4Yua2hgngv"
+  case _ => throw("Unknown chain")
+}
+let arbitrageDelay = match(chain) {
+  case base16'57' => DAY_MILLIS
+  case base16'54' => 60000 # 1 minute for testnet
+  case _ => throw("Unknown chain")
+}
+let oldStakingContractStr = match(chain) {
+  case base16'57' => "3PLncXtS1U83D6cQbFD3H8rBHPLgzxSFKZ1"
+  case base16'54' => "3NDCyBG5q85JuaRiigUeEtainyjCQT3XpZm"
+  case _ => throw("Unknown chain")
+}
+
+func getStringOrFail(address: Address, key: String) = address.getString(key)
+    .valueOrErrorMessage(makeString(["mandatory ", address.toString(), ".", key, " is not defined"], ""))
+func getIntOrElse(key: String, defaultVal: Int) = this.getInteger(key).valueOrElse(defaultVal)
+
+# data indices from rest2Config (index 0 is descriptor %s%s..)
+let IdxCfgAcres2Dapp     = 1
+let IdxCfgWlgDapp        = 2
+let IdxCfgGovernanceDapp = 3
+let IdxCfgPuzzlePoolDapp = 4
+let IdxCfgInvestFundDapp = 5
+
+func keyRestCfg() = "%s__restConfig"
+func keyRest2Address() = "%s__rest2Addr"
+
+func readRestCfgOrFail(rest: Address) = split_4C(rest.getStringOrFail(keyRestCfg()), SEP)
+func getContractAddressOrFail(rest2Cfg: List[String], idx: Int) = rest2Cfg[idx].addressFromString()
+  .valueOrErrorMessage("Rest cfg doesn't contain address at index " + idx.toString())
+
+# GLOBAL VARIABLES
+let rest2Contract = this.getString(keyRest2Address()).valueOrElse(defaultRest2AddressStr).addressFromStringValue()
+let rest2Cfg = rest2Contract.readRestCfgOrFail()
+let acres2Contract = rest2Cfg.getContractAddressOrFail(IdxCfgAcres2Dapp)
+let wlgContract = rest2Cfg.getContractAddressOrFail(IdxCfgWlgDapp)
+let puzzlePoolContract = rest2Cfg.getContractAddressOrFail(IdxCfgPuzzlePoolDapp)
+let investFundContract = rest2Cfg.getContractAddressOrFail(IdxCfgInvestFundDapp)
+
+let oldAcresContractKey = "oldAcresContract"
+
+func keyBlocked() = "contractsBlocked"
+func keyLastTxIdByUser(addr: String) = "lastTxIdByUser_" + addr
+
+let wlgAssetIdKey = "wlg_assetId"
+let wlgAssetId = wlgContract.getBinary(wlgAssetIdKey).valueOrErrorMessage("WLGOLD is not issued yet")
+let acresIssuedAmountKey = "acresIssuedAmount"
+let acresAssetIdKey = "acresAssetId"
+let acresAssetId = acres2Contract.getBinary(acresAssetIdKey).valueOrErrorMessage("ACRES is not issued yet")
+let acresIdStr = acresAssetId.toBase58String()
+func keyAcresStakedTimeByUser(addr: String) = "acresStakedTimeByUser_" + addr
+# from oldStakingContract
+func keyStakedLandsByOwner(ownerAddr: String) = "stakedLandsByOwner_" + ownerAddr
+func keyStakedDuckByOwner(ownerAddr: String) = "stakedDuckByOwner_" + ownerAddr
+
+func keyAddressToCustomName(addr: String) = "accountCustomNameByAddr_" + addr
+func keyAddressRefBy(addr: String) = "accRefBy_" + addr # if present, then addr has/had ONBOARD artifact
+func keyAddressReferrals(addr: String) = "accReferrals_" + addr
+
+func asString(v: Any) = {
+  match v {
+    case s: String => s
+    case _ => throw("fail to cast into String")
+  }
+}
+func asInt(v: Any) = {
+  match v {
+    case n: Int => n
+    case _ => throw("fail to cast into Int")
+  }
+}
+func asAnyList(v: Any) = {
+  match v {
+    case l: List[Any] => l
+    case _ => throw("fail to cast into List[Any]")
+  }
+}
+func asBoolean(v: Any) = {
+  match v {
+    case s: Boolean => s
+    case _ => throw("fail to cast into Boolean")
+  }
+}
+func asTuple5Ints(val: Any) = {
+  match val {
+    case t: (Int, Int, Int, Int, Int) => t
+    case _ => throw("fail to cast into (Int, Int, Int, Int, Int)")
+  }
+}
+func asTuple4Ints(val: Any) = {
+  match val {
+    case t: (Int, Int, Int, Int) => t
+    case _ => throw("fail to cast into (Int, Int, Int, Int)")
+  }
+}
+func asTuple3Ints(val: Any) = {
+  match val {
+    case t: (Int, Int, Int) => t
+    case _ => throw("fail to cast into (Int, Int, Int)")
+  }
+}
+func asTuple2Ints(val: Any) = {
+  match val {
+    case t: (Int, Int) => t
+    case _ => throw("fail to cast into (Int, Int)")
+  }
+}
+
+# print integer as fixed point string
+func fixedPoint(val: Int, decimals: Int) = {
+  let tenPow = pow(10, 0, decimals, 0, 0, DOWN)
+  let lowPart = toString(val % tenPow)
+  let zeroes = tenPow.toString().drop(1 + lowPart.size())
+  toString(val / tenPow) + "." + zeroes + lowPart
+}
+
+func wlgold2acres(wlgAmount: Int) = {
+  let issuedAmount = wlgContract.getInteger("wlg_issuedAmount").valueOrErrorMessage("WLGOLD is not issued yet")
+  let wlgUsd = wlgContract.assetBalance(usdtAssetId)
+  let investFundTotal = investFundContract.assetBalance(usdtAssetId) + investFundContract.getInteger("zbill_issuedAmount").valueOrElse(0)
+  let tvlUsd = wlgUsd + investFundTotal # + restUsd + puzzleUsd
+  let wlgSupply = issuedAmount - 100000_0000_0000 # 100k WLGOLD reserved on marketing wallet
+  # acresAmount = tvl/10*ln(1/(1-wlgAmount/wlgSupply))
+  let fr8 = fraction(MULT8, wlgSupply, wlgSupply - wlgAmount)
+  let ln8 = log(fr8, 8, E8, 8, 8, HALFUP)
+  fraction(tvlUsd, ln8, MULT7)
+}
+
+func acres2wlgold(acresAmount: Int) = {
+  let issuedAmount = wlgContract.getInteger("wlg_issuedAmount").valueOrErrorMessage("WLGOLD is not issued yet")
+  let wlgUsd = wlgContract.assetBalance(usdtAssetId)
+  let investFundTotal = investFundContract.assetBalance(usdtAssetId) + investFundContract.getInteger("zbill_issuedAmount").valueOrElse(0)
+  let tvlUsd = wlgUsd + investFundTotal # + restUsd + puzzleUsd
+  let wlgSupply = issuedAmount - 100000_0000_0000 # 100k WLGOLD reserved on marketing wallet
+  let exp8 = fraction(-MULT7, acresAmount, tvlUsd)
+  let ex8 = pow(E8, 8, exp8, 8, 8, HALFUP)
+  fraction(wlgSupply, MULT8 - ex8, MULT8)
+}

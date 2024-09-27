@@ -55,7 +55,7 @@ func proposalData(proposalTxId: String, title: String, proposalTime: Int, voting
     proposalTime.toString(),    # 3
     votingStartTime.toString(), # 4
     votingEndTime.toString(),   # 5
-    quorumInGwl.toString(),   # 6
+    quorumInGwl.toString(),     # 6 (8 decimals)
     options                     # 7 "NO:YES"
     ], SEP)
 }
@@ -126,10 +126,9 @@ func castVote(proposalId: Int, choice: Int) = {
     if (numOptions <= 1) then throw("Too few choices to vote") else
     if (choice >= numOptions) then throw("Unknown choice! Must be 0.." + (numOptions - 1).toString()) else
 
-    let eff = getVotingPower(userAddressStr)
-    let gwlAmt = eff[IdxEffUser]
-    if (gwlAmt <= 0) then throw("You need staked lands to vote") else
-    let gwlTotal = eff[IdxEffTotal]
+    let eff = getVerboseVotingPower(userAddressStr)
+    let gwlAmt = eff[IdxEffUser] * MULT8 + eff[idxEffAcresUser]
+    if (gwlAmt <= 0) then throw("You need staked lands or ACRES to vote") else
 
     let oldChoice = getInteger(keyProposalChoiceByIdAndUser(proposalId, userAddressStr))
     let oldUserVotes = if (!oldChoice.isDefined()) then 0 
@@ -189,11 +188,11 @@ func initiateVoting(title: String, votingStartTime: Int, votingEndTime: Int, opt
   if (votingEndTime < votingStartTime) then throw("votingEndTime=" + votingEndTime.toString() + " < votingStartTime=" + votingStartTime.toString()) else
   if (votingEndTime - votingStartTime > MAXVOTINGTIME) then throw("Voting period exceeds max: " + (votingEndTime - votingStartTime).toString() + " > " + MAXVOTINGTIME.toString()) else
   if (optionsList.size() <= 1) then throw("Too few choices to vote") else
-  let eff = getVotingPower("")
-  let gPiecesTotal = eff[IdxEffTotal]
+  let eff = getVerboseVotingPower("")
+  let gAcresTotal = eff[IdxEffTotal] * MULT8 + eff[idxEffAcresTotal]
 
   let quorum = getIntOrElse(keyQuorumRequiredPercent(), DEFAULTQUORUM)
-  let quorumInGpieces = fraction(quorum, gPiecesTotal, MULT6)
+  let quorumInGacres = fraction(quorum, gAcresTotal, MULT6)
 
   let proposalId = getIntOrElse(keyLastProposalId(), 0) + 1
   let optionsStr = makeString(optionsList, LISTSEP) # TODO: check options for length and special chars
@@ -201,7 +200,7 @@ func initiateVoting(title: String, votingStartTime: Int, votingEndTime: Int, opt
     IntegerEntry(keyLastProposalId(), proposalId),
     StringEntry(keyProposalStatusDataById(proposalId), statusData(false, 0, 0, 0, false)), # isVotingValid, winOption, winOptionVotes, totalVotes, canceledByTeam
     StringEntry(keyProposalDataById(proposalId), 
-      proposalData(proposalTxId, title.toBytes().toBase16String(), proposalTime, votingStartTime, votingEndTime, quorumInGpieces, optionsStr))
+      proposalData(proposalTxId, title.toBytes().toBase16String(), proposalTime, votingStartTime, votingEndTime, quorumInGacres, optionsStr))
   ], proposalTxId)
 }
 

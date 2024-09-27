@@ -1,0 +1,277 @@
+{-# STDLIB_VERSION 6 #-}
+{-# CONTENT_TYPE DAPP #-}
+{-# SCRIPT_TYPE ACCOUNT #-}
+{-# IMPORT common.ride,landlib.ride,rpglib.ride,wlglib.ride #-}
+
+let MAXTOURNAMENTLENGTH = 1296000000 # 15*24*60*60*1000ms
+let HOUR = 3_600_000 # 60*60*1000ms
+
+let adminsList = [
+  this.toString(),
+  match(chain) {
+    case base16'57' => "3PEe2RELUHCFCBsmSCNcBJ8N3URLVQende7"
+    case base16'54' => "3MtBgJTaLxPB3C7UJD1UE8qjkHthfKvFQYY"
+    case _ => throw("Unknown chain")
+  }
+]
+
+func staticData(txId: String, registerCost: Int, attemptCost: Int, creationTime: Int, startTime: Int, endTime: Int, numGrands: Int, prizeFund: Int, prizeAsset: String) = {
+  makeString(["%s%d%d%d%d%d%d%d%s",
+    txId,                    # 1
+    registerCost.toString(), # 2
+    attemptCost.toString(),  # 3
+    creationTime.toString(), # 4
+    startTime.toString(),    # 5
+    endTime.toString(),      # 6
+    numGrands.toString(),    # 7
+    prizeFund.toString(),    # 8
+    prizeAsset               # 9
+  ], SEP)
+}
+
+func dynamicData(status: String, leaders: String, winResult: Int, totalRegs: Int, totalAttempts: Int) = {
+  makeString_2C(["%s%s%d%d%d",
+    status,                  # 1 CREATED | INPROGRESS | PROCESSING | ARCHIVED
+    leaders,                 # 2 list of ducks
+    winResult.toString(),    # 3 
+    totalRegs.toString(),    # 4 
+    totalAttempts.toString() # 5 
+    ], SEP)
+}
+
+func prolog() = {
+  stakingContract.reentrantInvoke("saveLastTx", [], []).asInt()
+}
+
+func duckByCaller(caller: Address) = {
+  stakingContract.getString(keyStakedDuckByOwner(caller.toString())).valueOrErrorMessage("You don't have a duck staked")
+}
+
+@Callable(i)
+func createTournament(startTime: Int, endTime: Int, registerCost: Int, attemptCost: Int, numGrands: Int, prizeFund: Int, prizeAsset: String) = {
+  let caller = i.caller.toString()
+  if (!adminsList.containsElement(caller)) then throw("Permission denied") else
+
+  let lastId = getInteger(lastTourIdKey)
+
+  let tId = if (lastId.isDefined()) then {
+    # check status
+    let lastTourId = lastId.value()
+    let dynamic = getString(keyTourDynamicDataById(lastTourId)).valueOrErrorMessage("Error reading tournament " + lastTourId.toString() + " data")
+    let status = dynamic.split(SEP)[tDynamicStatus]
+    if (status != "ARCHIVED" && status != "PROCESSING") then throw("Current tournement is not completed, status=" + status) else
+    lastTourId + 1
+  } else 
+    # the first tournament - create it
+    1
+  
+  let now = lastBlock.timestamp
+  if (startTime < now) then throw("startTime=" + startTime.toString() + " < creationTime=" + now.toString()) else
+  if (endTime < startTime) then throw("endTime=" + endTime.toString() + " < startTime=" + startTime.toString()) else
+  if (endTime - startTime > MAXTOURNAMENTLENGTH) then throw("Tournament period exceeds max: " + (endTime - startTime).toString() + " > " + MAXTOURNAMENTLENGTH.toString()) else
+  if (registerCost < 0 || attemptCost < 0) then throw("Cost should be positive, but passed " + registerCost.toString() + " and " + attemptCost.toString()) else
+  if (numGrands < 0) then throw("Number of Grand Prizes should be non-negative") else
+  if (prizeFund < 0) then throw("Prize Fund should be non-negative") else
+
+  ([IntegerEntry(lastTourIdKey, tId),
+    StringEntry(keyTourStaticDataById(tId), staticData(i.transactionId.toBase58String(), registerCost, attemptCost, now, startTime, endTime, numGrands, prizeFund, prizeAsset)),
+    StringEntry(keyTourDynamicDataById(tId), dynamicData("CREATED", " ", 0, 0, 0))
+  ], tId)
+}
+
+@Callable(i)
+func register() = {
+  strict prologResult = prolog()
+  let lastId = getInteger(lastTourIdKey).valueOrErrorMessage("No active tournaments")
+  let now = lastBlock.timestamp
+  let tData = this.getTourData(lastId)
+  let static = tData[idxStatic]
+  let dynamic = tData[idxDynamic]
+  let status = dynamic[tDynamicStatus]
+  if (!(status == "CREATED" && now > static[tStaticStart].parseIntValue() && now < (static[tStaticEnd].parseIntValue() - HOUR) ||
+    status == "INPROGRESS" && now < (static[tStaticEnd].parseIntValue() - HOUR))) then throw("Cannot register now") else
+  let regCost = static[tStaticRegisterCost].parseIntValue()
+  let assetId = if (static.size() > tStaticAsset) then static[tStaticAsset].fromBase58String() else wlgAssetId
+  let nfo = assetId.assetInfo().valueOrErrorMessage("No assetInfo available")
+  let assetName = nfo.name
+  let assetDecimals = nfo.decimals
+  let regAmt = if (regCost > 0) then {
+    if (i.payments.size() != 1) then throw("exactly 1 payment must be attached") else
+    let pmt = i.payments[0]
+    if (!pmt.assetId.isDefined() || pmt.assetId.value() != assetId) then throw(assetName + " payments only!") else
+    pmt.amount
+  } else {
+    if (i.payments.size() != 0) then throw("No payments required") else
+    0
+  }
+  if (regAmt != regCost) then throw("Need payment of " + regCost.fixedPoint(assetDecimals) + " " + assetName) else
+  let duckAssetId = duckByCaller(i.originCaller)
+  let scoreKey = keyScoreBoardByTour(lastId)
+  let oldScoreBoard = getString(scoreKey).valueOrElse("")
+  if (getBoolean(keyIsRegisteredByTourAndDuck(lastId, duckAssetId)).valueOrElse(false) ||
+    oldScoreBoard.contains(duckAssetId)) then throw("Your duck " + duckAssetId + " is already registered at tournament " + lastId.toString()) else
+  let updatedDynamicData = dynamicData("INPROGRESS", dynamic[tDynamicLeaders], dynamic[tDynamicWinResult].parseIntValue(), 
+    dynamic[tDynamicTotalRegCount].parseIntValue() + 1, dynamic[tDynamicTotalAttempts].parseIntValue())
+  ([
+    IntegerEntry(keyLastRegisteredTourByDuck(duckAssetId), lastId),
+    BooleanEntry(keyIsRegisteredByTourAndDuck(lastId, duckAssetId), true),
+    StringEntry(scoreKey, if (oldScoreBoard == "") then duckAssetId + ":000" else oldScoreBoard + "_" + duckAssetId + ":000"),
+    StringEntry(keyTourDynamicDataById(lastId), updatedDynamicData)
+  ], prologResult)
+}
+
+@Callable(i)
+func newAttempt() = {
+  strict prologResult = prolog()
+  let duckAssetId = duckByCaller(i.originCaller)
+  let lastId = getInteger(lastTourIdKey).valueOrErrorMessage("No active tournaments")
+  let now = lastBlock.timestamp
+  let tData = this.getTourData(lastId)
+  let static = tData[idxStatic]
+  let dynamic = tData[idxDynamic]
+  let status = dynamic[tDynamicStatus]
+  if (!(status == "INPROGRESS" && now < (static[tStaticEnd].parseIntValue() - HOUR))) then throw("Attempt is not possible") else
+  if (!getBoolean(keyIsRegisteredByTourAndDuck(lastId, duckAssetId)).valueOrElse(false)) then throw("Your duck " + duckAssetId + " is not registered at tournament " + lastId.toString()) else
+  let attemptsIteratorKey = keyLastAttemptByTourAndDuck(lastId, duckAssetId)
+  let lastAttempt = getInteger(attemptsIteratorKey)
+  let (payedAttempts, increment) = if (!lastAttempt.isDefined()) then (0, 0) else {
+    if (i.payments.size() != 1) then throw("exactly 1 payment must be attached") else
+    let pmt = i.payments[0]
+    let assetId = if (static.size() > tStaticAsset) then static[tStaticAsset].fromBase58String() else wlgAssetId
+    let nfo = assetId.assetInfo().valueOrErrorMessage("No assetInfo available")
+    let assetName = nfo.name
+    let assetDecimals = nfo.decimals
+    let amt = pmt.amount
+    if (!pmt.assetId.isDefined() || pmt.assetId.value() != assetId) then throw(assetName + " payments only!") else
+    let attCost = static[tStaticAttemptCost].parseIntValue()
+    if (amt != attCost) then throw("Need payment of " + attCost.fixedPoint(assetDecimals) + " " + assetName) else
+    (lastAttempt.value() + 1, 1)
+  }
+  # also we should increment global payed attempts counter
+  let updatedDynamicData = dynamicData("INPROGRESS", dynamic[tDynamicLeaders], dynamic[tDynamicWinResult].parseIntValue(), 
+    dynamic[tDynamicTotalRegCount].parseIntValue(), dynamic[tDynamicTotalAttempts].parseIntValue() + increment)
+
+  let tourLoc = stakingContract.invoke("initDuckTourAttempt", [duckAssetId], []).asString()
+  ([IntegerEntry(attemptsIteratorKey, payedAttempts),
+    StringEntry(keyTourDynamicDataById(lastId), updatedDynamicData)
+  ], [prologResult, payedAttempts, tourLoc])
+}
+
+# called by stakingContract.flight() if duck beats its own score in actual tournament
+@Callable(i)
+func saveDuckResult(duckAssetId: String, duckNewBest: Int) = {
+  if (i.caller != stakingContract) then throw("Access denied") else
+  let lastId = getInteger(lastTourIdKey).valueOrErrorMessage("No active tournaments")
+  let tData = this.getTourData(lastId)
+  let static = tData[idxStatic]
+  let dynamic = tData[idxDynamic]
+  let curLocation = stakingContract.getString(keyDuckLocation(duckAssetId)).valueOrElse(DEFAULTLOCATION)
+  # location = continent_type_id; For tournaments: tId_T_distance
+  let bestResultKey = keyBestResultByTourAndDuck(lastId, duckAssetId)
+  let sumScoresKey = keySumScoresByTour(lastId)
+  let oldSumScores = getInteger(sumScoresKey).valueOrElse(0)
+  if (isInTournament(this, curLocation)) then {
+    let duckOldBest = getInteger(bestResultKey).valueOrElse(0)
+    let scoreKey = keyScoreBoardByTour(lastId)
+    let oldScoreBoard = getString(scoreKey).valueOrElse("")
+    let (newScoreBoard, newSumScores, globalActions) = if (duckNewBest > duckOldBest) then {
+      if (!oldScoreBoard.contains(duckAssetId)) then throw("scoreBoard does not contain " + duckAssetId) else
+
+      let oldBest = dynamic[tDynamicWinResult].parseIntValue()
+      let leaders = dynamic[tDynamicLeaders]
+      let oldLeadersList = if (leaders == "" || leaders == " ") then [] else leaders.split_4C(",")
+      let newLeadersList = if (duckNewBest > oldBest) then [duckAssetId]
+        else if (duckNewBest < oldBest || oldLeadersList.containsElement(duckAssetId)) then oldLeadersList else oldLeadersList :+ duckAssetId
+      let updatedDynamicData = dynamicData("INPROGRESS", makeString_2C(newLeadersList, ","), max([duckNewBest, oldBest]), 
+        dynamic[tDynamicTotalRegCount].parseIntValue(), dynamic[tDynamicTotalAttempts].parseIntValue())
+
+      let parts = oldScoreBoard.split_51C(duckAssetId)
+      (parts[0] + duckAssetId + ":" + duckNewBest.padL(3) + parts[1].drop(4), 
+        oldSumScores + duckNewBest - duckOldBest, 
+        [StringEntry(keyTourDynamicDataById(lastId), updatedDynamicData)]
+      )
+    } else (oldScoreBoard, oldSumScores, [])
+    ([IntegerEntry(bestResultKey, max([duckOldBest, duckNewBest])),
+      IntegerEntry(sumScoresKey, newSumScores),
+      StringEntry(keyBestTxByTourAndDuck(lastId, duckAssetId), i.transactionId.toBase58String()),
+      StringEntry(scoreKey, newScoreBoard)] ++ globalActions, 0)
+  } else ([], 0)
+}
+
+@Callable(i)
+func processTournament(tId: Int) = {
+  let caller = i.caller.toString()
+  if (!adminsList.containsElement(caller)) then throw("Permission denied") else
+  let now = lastBlock.timestamp
+  let tData = this.getTourData(tId)
+  let static = tData[idxStatic]
+  let dynamic = tData[idxDynamic]
+  let status = dynamic[tDynamicStatus]
+  let registrations = dynamic[tDynamicTotalRegCount].parseIntValue()
+  let paidAttempts = dynamic[tDynamicTotalAttempts].parseIntValue()
+  let regCost = static[tStaticRegisterCost].parseIntValue()
+  let attCost = static[tStaticAttemptCost].parseIntValue()
+  if (status == "ARCHIVED") then throw("Tournament " + tId.toString() + " is already ARCHIVED") else
+  if (status == "INPROGRESS" && now < static[tStaticEnd].parseIntValue()) then throw("Tournament " + tId.toString() + " is not over yet") else
+  let updatedDynamicData = dynamicData("PROCESSING", dynamic[tDynamicLeaders], dynamic[tDynamicWinResult].parseIntValue(), registrations, paidAttempts)
+  let prizeFund = if (static.size() > tStaticPrizeFund) then static[tStaticPrizeFund].parseIntValue() else 0
+  let unpaid = (registrations * regCost + paidAttempts * attCost) / 2 + prizeFund
+ 
+  ([StringEntry(keyTourDynamicDataById(tId), updatedDynamicData),
+    IntegerEntry(keyUnpaidRewardsByTour(tId), unpaid)], 0)
+}
+
+@Callable(i)
+func claimPrize(tId: Int) = {
+  strict prologResult = prolog()
+  if (i.payments.size() != 0) then throw("No payments required") else
+  let tData = this.getTourData(tId)
+  let static = tData[idxStatic]
+  let dynamic = tData[idxDynamic]
+  let status = dynamic[tDynamicStatus]
+  if (status != "PROCESSING") then throw("Tournament " + tId.toString() + " is not PROCESSING") else
+  let registrations = dynamic[tDynamicTotalRegCount].parseIntValue()
+  let paidAttempts = dynamic[tDynamicTotalAttempts].parseIntValue()
+  let regCost = static[tStaticRegisterCost].parseIntValue()
+  let attCost = static[tStaticAttemptCost].parseIntValue()
+  let prizeFund = if (static.size() > tStaticPrizeFund) then static[tStaticPrizeFund].parseIntValue() else 0
+  let awardFunds = (registrations * regCost + paidAttempts * attCost) / 2 + prizeFund
+  let unpaidKey = keyUnpaidRewardsByTour(tId)
+  let unpaidFunds = getInteger(unpaidKey).valueOrElse(0)
+
+  let duckAssetId = duckByCaller(i.originCaller)
+  if (!getBoolean(keyIsRegisteredByTourAndDuck(tId, duckAssetId)).valueOrElse(false)) then throw("Your duck " + duckAssetId + " is not registered at tournament " + tId.toString()) else
+  let bestResultKey = keyBestResultByTourAndDuck(tId, duckAssetId)
+  let duckBest = getInteger(bestResultKey).valueOrElse(0)
+  if (duckBest == 0) then throw("Your duck got zero score") else
+  let awardedKey = keyIsAwardedByTourAndDuck(tId, duckAssetId)
+  if (getBoolean(awardedKey).valueOrElse(false)) then throw("Your duck " + duckAssetId + " is already awarded at tournament " + tId.toString()) else
+  let sumScoresKey = keySumScoresByTour(tId)
+  let sumScores = getInteger(sumScoresKey).valueOrElse(0)
+  let leaders = dynamic[tDynamicLeaders]
+  let leadersList = if (leaders == "" || leaders == " ") then [] else leaders.split_4C(",")
+  let numLeaders = leadersList.size()
+  if (numLeaders == 0) then throw("No leaders at tournament " + tId.toString()) else
+  let numGrands = static[tStaticNumGrands].parseIntValue()
+  let winResult = dynamic[tDynamicWinResult].parseIntValue()
+  let sumLeaderScores = if (numLeaders > numGrands) then 0 else {
+    # leaders are skipped, all other are awarded with prizeAsset prizes. sumScores - sumLeaderScores
+    if (leadersList.containsElement(duckAssetId)) then throw("As one of winners, you will be awarded by admins") else
+    numLeaders * winResult
+  }
+  let yourAmount = min([fraction(duckBest, awardFunds, sumScores - sumLeaderScores), unpaidFunds])
+  let newUnpaidAmount = unpaidFunds - yourAmount
+  let updatedDynamicData = dynamicData("ARCHIVED", dynamic[tDynamicLeaders], winResult, registrations, paidAttempts)
+  let archiveAction = if (newUnpaidAmount <= 0) then [StringEntry(keyTourDynamicDataById(tId), updatedDynamicData)] else []
+  let assetId = if (static.size() > tStaticAsset) then static[tStaticAsset].fromBase58String() else wlgAssetId
+
+  # auto break attempt on claiming, but only for actual tournamentId
+  let loc = stakingContract.getString(keyDuckLocation(duckAssetId)).valueOrElse(DEFAULTLOCATION).split("_")
+  let breakActions = if (loc[locIdxType] == "T"
+    && this.getTourData(loc[locIdxContinent].parseIntValue())[idxDynamic][tDynamicStatus] == "PROCESSING")
+  then stakingContract.invoke("breakAttemptCallback", [], []) else unit
+
+  ([ScriptTransfer(i.caller, yourAmount, assetId),
+    BooleanEntry(awardedKey, true),
+    IntegerEntry(unpaidKey, newUnpaidAmount)] ++ archiveAction, breakActions)
+}

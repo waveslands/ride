@@ -3,12 +3,13 @@
 {-# SCRIPT_TYPE ACCOUNT #-}
 {-# IMPORT common.ride,landlib.ride,rpglib.ride #-}
 
-# https://www.mathcha.io/editor/Dq3mYFy7UqlHl4FqkZMkWh2BQZDvtyEZPMgTxVj0rp
 
 let FACTORYMAXWAREHOUSE = 100_0000_0000 # 100 material for each type
 let SELLMULTIPLIER = 200
 let BUYMULTIPLIER = 300
 let AUCTIONFEE = 10000 # 1%; actually 3*AUCTIONFEE is taken
+let DELIVERY_FEE = 10000 # 1%
+let DELIVERY_FEE15 = 15000 # 1.5%
 
 func keyFactoryWarehouseByIdAndType(factoryId: String, resType: Int) = "factoryWhByContinentAndRes_" + factoryId + "_" + resType.toString()
 
@@ -73,7 +74,8 @@ func buyInternal(locId: String, matType: Int, amount: Int, maxPrice: Int) = {
   let m1 = if (w0 > FACTORYMAXWAREHOUSE) then min([amount, w0 - FACTORYMAXWAREHOUSE]) else 0
   let m0 = min([w0, amount - m1])
   let m = m0 + m1
-  let usdtSpent = fraction(m0, BUYMULTIPLIER * RESOURCEPRICEMIN - fraction(100 * w0 - 50 * m0, RESOURCEPRICEMIN, FACTORYMAXWAREHOUSE), MULT10)
+  let w0min = min([w0, FACTORYMAXWAREHOUSE])
+  let usdtSpent = fraction(m0, BUYMULTIPLIER * RESOURCEPRICEMIN - fraction(100 * w0min - 50 * m0, RESOURCEPRICEMIN, FACTORYMAXWAREHOUSE), MULT10)
     + fraction(m1, 2 * RESOURCEPRICEMIN, MULT8)
 
   let max101 = maxPrice + maxPrice / 100 # 1% tolerance allowed
@@ -84,7 +86,7 @@ func buyInternal(locId: String, matType: Int, amount: Int, maxPrice: Int) = {
 }
 
 func getBackpack(bpKey: String) = {
-  let p = stakingContract.getString(bpKey).valueOrElse("0:0_0_0_0_0_0:0_0_0_0_0_0:").split(":")
+  let p = stakingContract.getString(bpKey).valueOrElse("0:0_0_0_0_0_0:0_0_0_0_0_0:").split_4C(":")
   [
     p[bpIdxLevel].parseInt().valueOrElse(0).toString(),
     if (p[bpIdxRes].split("_").size() == NUMRES) then p[bpIdxRes] else "0_0_0_0_0_0",
@@ -98,50 +100,61 @@ func checkBlocked() = {
 }
 
 func prolog() = {
-  stakingContract.invoke("saveLastTx", [], []).asInt()
+  stakingContract.reentrantInvoke("saveLastTx", [], []).asInt()
 }
 
-# In case of products this func could be called 0 times (no prod order)
-#           1               2                  3       4          5                      6                             7                  8            9
-# acc: (iterIndex, newWh{Res|Mat|Prod}List, buyVol, sellVol, usdtNeed2Lock, initialWh{Res|Mat|Prod}List, currWhOrd{Res|Mat|Prod}List, isProduct, newOccupiedVol)
+# Even in case of empty new products order this func should be called numProducts times
+# acc: (
+# 1 iterIndex, 
+# 2 newWh{Res|Mat|Prod}List, 
+# 3 buyVol, 
+# 4 sellVol, 
+# 5 usdtNeed2Lock, 
+# 6 initialWh{Res|Mat|Prod}List, 
+# 7 currWhOrd{Res|Mat|Prod}List, 
+# 8 isProduct, 
+# 9 newOccupiedVol, 
+# 10 newWhOrd{Res|Mat|Prod}List
+# )
 # order item: ${amount}@${price}
-func setCommon(acc: (Int, List[String], Int, Int, Int, List[String], List[String], Boolean, Int), item: String) = {
+func setCommon(acc: (Int, List[String], Int, Int, Int, List[String], List[String], Boolean, Int, List[String]), ignoredIterator: String) = {
   let j = acc._1 # iterate res/mat/prod
+  let item = if (size(acc._10) > j) then  acc._10[j] else "0@0"
   let isProd = acc._8
   let itemParts = item.split("@")
   if (itemParts.size() != 2) then throw("Incorrect order format, should be amount@price") else
   let newOrdAm = itemParts[0].parseIntValue()
   let newOrdPr = itemParts[1].parseIntValue()
-  let newOrdUsd = fraction(newOrdAm, newOrdPr, MULT8) # can be <=> 0
+  let newOrdUsd = if (isProd) then newOrdAm * newOrdPr else fraction(newOrdAm, newOrdPr, MULT8) # can be <=> 0
   let newOrdVol = toVolume(newOrdAm, PRODUCTPKGSIZE, isProd)
   let whInit = if (size(acc._6) > j) then acc._6[j].parseIntValue() else 0
   let curOrdParts = (if (size(acc._7) > j) then  acc._7[j] else "0@0").split("@")
   let curOrdAm = curOrdParts[0].parseIntValue()
   let curOrdPr = curOrdParts[1].parseIntValue()
   if (curOrdPr < 0 || newOrdPr < 0) then throw("Price can't be negative") else
-  let curOrdUsd = fraction(curOrdAm, curOrdPr, MULT8) # can be <=> 0
+  let curOrdUsd = if (isProd) then curOrdAm * curOrdPr else fraction(curOrdAm, curOrdPr, MULT8) # can be <=> 0
   if (newOrdAm == 0) then { # unlock from order to wh
     if (curOrdAm > 0) then { # old order was BUY => free locked space and locked usd
-      (j+1, acc._2 :+ toString(whInit), acc._3, acc._4, acc._5 - curOrdUsd, acc._6, acc._7, isProd, acc._9 + toVolume(whInit, PRODUCTPKGSIZE, isProd))
+      (j+1, acc._2 :+ toString(whInit), acc._3, acc._4, acc._5 - curOrdUsd, acc._6, acc._7, isProd, acc._9 + toVolume(whInit, PRODUCTPKGSIZE, isProd), acc._10)
     } else {
-      # curOrdAm == 0 => do nothing
+      # curOrdAm == 0 => do nothing (auto covered by case below)
       # curOrdAm < 0, old order was Sell => return locked items to WH, free locked space. No usd was locked
-      (j+1, acc._2 :+ toString(whInit - curOrdAm), acc._3, acc._4, acc._5, acc._6, acc._7, isProd, acc._9 + toVolume(whInit - curOrdAm, PRODUCTPKGSIZE, isProd))
+      (j+1, acc._2 :+ toString(whInit - curOrdAm), acc._3, acc._4, acc._5, acc._6, acc._7, isProd, acc._9 + toVolume(whInit - curOrdAm, PRODUCTPKGSIZE, isProd), acc._10)
     }
   } else if (newOrdAm > 0) then { # buy to wh: lock some wh volume for this buy, lock usdt for buy
     if (curOrdAm < 0) then { # old order was Sell => return locked items to WH, free locked space. No usd was locked
-      (j+1, acc._2 :+ toString(whInit - curOrdAm), acc._3 + newOrdVol, acc._4, acc._5 + newOrdUsd, acc._6, acc._7, isProd, toVolume(whInit - curOrdAm, PRODUCTPKGSIZE, isProd))
+      (j+1, acc._2 :+ toString(whInit - curOrdAm), acc._3 + newOrdVol, acc._4, acc._5 + newOrdUsd, acc._6, acc._7, isProd, toVolume(whInit - curOrdAm, PRODUCTPKGSIZE, isProd), acc._10)
     } else { # curOrdAm >= 0, old order was BUY or none => modify WH locked space and locked usd
-      (j+1, acc._2 :+ toString(whInit), acc._3 + newOrdVol, acc._4, acc._5 + newOrdUsd - curOrdUsd, acc._6, acc._7, isProd, toVolume(whInit, PRODUCTPKGSIZE, isProd))
+      (j+1, acc._2 :+ toString(whInit), acc._3 + newOrdVol, acc._4, acc._5 + newOrdUsd - curOrdUsd, acc._6, acc._7, isProd, toVolume(whInit, PRODUCTPKGSIZE, isProd), acc._10)
     }
   } else { # newOrdAm < 0, sell: lock from wh to order
     if (curOrdAm < 0) then { # old order was Sell => return locked items to WH, modify locked space. No usd was locked
       let amDiff = curOrdAm - newOrdAm
       if (whInit - amDiff < 0) then throw("Attempt to take " + toString(amDiff) + " from warehouse, but only " + whInit.toString() + " available") else
-      (j+1, acc._2 :+ toString(whInit - amDiff), acc._3, acc._4 - newOrdVol, acc._5, acc._6, acc._7, isProd, toVolume(whInit - amDiff, PRODUCTPKGSIZE, isProd))
+      (j+1, acc._2 :+ toString(whInit - amDiff), acc._3, acc._4 - newOrdVol, acc._5, acc._6, acc._7, isProd, toVolume(whInit - amDiff, PRODUCTPKGSIZE, isProd), acc._10)
     } else { # curOrdAm >= 0, old order was BUY or none => modify WH locked space and free locked usd
       if (whInit + newOrdAm < 0) then throw("Attempt to take " + toString(-newOrdAm) + " from warehouse, but only " + whInit.toString() + " available") else
-      (j+1, acc._2 :+ toString(whInit + newOrdAm), acc._3, acc._4 - newOrdVol, acc._5 - curOrdUsd, acc._6, acc._7, isProd, toVolume(whInit + newOrdAm, PRODUCTPKGSIZE, isProd))
+      (j+1, acc._2 :+ toString(whInit + newOrdAm), acc._3, acc._4 - newOrdVol, acc._5 - curOrdUsd, acc._6, acc._7, isProd, toVolume(whInit + newOrdAm, PRODUCTPKGSIZE, isProd), acc._10)
     }
   }
 }
@@ -149,24 +162,22 @@ func setCommon(acc: (Int, List[String], Int, Int, Int, List[String], List[String
 func setInternal(currentWh: List[String], currentOrd: List[String], newOrd: List[String]) = {
   let currWhRes = currentWh[whIdxRes].split("_") # resources already in warehouse
   let currWhMat = currentWh[whIdxMat].split("_") # materials already in warehouse
-  let currWhProd = if (currentWh[whIdxProd] == "") then [] else currentWh[whIdxProd].split("_") # products already in warehouse
+  let currWhProd = if (currentWh[whIdxProd] == "") then [] else currentWh[whIdxProd].split_4C("_") # products already in warehouse
   let currentOrdRes = currentOrd[ordIdxRes].split("_") # res@price currently in order
   let currentOrdMat = currentOrd[ordIdxMat].split("_") # mat@price currently in order
-  let currentOrdProd = if (currentOrd[ordIdxProd] == "") then [] else currentOrd[ordIdxProd].split("_") # prod@price currently in order
+  let currentOrdProd = if (currentOrd[ordIdxProd] == "") then [] else currentOrd[ordIdxProd].split_4C("_") # prod@price currently in order
 
   if (newOrd.size() != 3) then throw("newOrderStr should contain exactly 2 ':' separators") else
   let resParts = newOrd[0].split("_")
   let matParts = newOrd[1].split("_")
-  let prodParts = if (newOrd[2] == "") then [] else newOrd[2].split("_")
+  let prodParts = if (newOrd[2] == "") then [] else newOrd[2].split_4C("_")
   if (resParts.size() != NUMRES) then throw("All 6 resources should be passed") else
   if (matParts.size() != NUMRES) then throw("All 6 materials should be passed") else
 
-  # acc: (iterIndex, newWh{Res|Mat|Prod}List, buyVol, sellVol, usdtNeed2Lock, initialWh{Res|Mat|Prod}List, currWhOrd{Res|Mat|Prod}List, isProduct)
-  let r = FOLD<6>(resParts, (0, [], 0, 0, 0, currWhRes, currentOrdRes, false, 0), setCommon)
-  let m = FOLD<6>(matParts, (0, [], r._3, r._4, r._5, currWhMat, currentOrdMat, false, r._9), setCommon)
-  let p = if (prodParts.size() != 0) then # new order contains products
-    FOLD<50>(prodParts, (0, [], m._3, m._4, m._5, currWhProd, currentOrdProd, true, m._9), setCommon)
-    else (0, currWhProd, m._3, m._4, m._5, currWhProd, currentOrdProd, true, m._9)
+  # acc: (iterIndex, newWh{Res|Mat|Prod}List, buyVol, sellVol, usdtNeed2Lock, initialWh{Res|Mat|Prod}List, currWhOrd{Res|Mat|Prod}List, isProduct, newOccupiedVol, newWhOrd{Res|Mat|Prod}List)
+  let r = FOLD<6>(resTypes, (0, [], 0, 0, 0, currWhRes, currentOrdRes, false, 0, resParts), setCommon)
+  let m = FOLD<6>(matTypes, (0, [], r._3, r._4, r._5, currWhMat, currentOrdMat, false, r._9, matParts), setCommon)
+  let p = FOLD<50>(prodTypes, (0, [], m._3, m._4, m._5, currWhProd, currentOrdProd, true, m._9, prodParts), setCommon)
   (r._2, m._2, p._2, p._3, p._4, p._5, p._9) # (newWhRes, newWhMat, newWhProd, buyVol, sellVol, usdSaldo, newOccupiedVol)
 }
 
@@ -177,8 +188,8 @@ func setInternal(currentWh: List[String], currentOrd: List[String], newOrd: List
 # 2 whOrder{Res|Mat|Prod}List
 # 3 bp{Res|Mat|Prod}List
 # 4 whVol2unlock
-# 5 usdWh2Bp
-# 6 usdBp2Wh
+# 5 usdWh2Bp (user sells to shop)
+# 6 usdBp2Wh (user buys from shop)
 # 7 iterIndex
 # 8 initialBp{Res|Mat|Prod}List
 # 9 initialWh{Res|Mat|Prod}List
@@ -194,7 +205,7 @@ func acceptCommon(acc: (List[String], List[String], List[String], Int, Int, Int,
   let bpOrdAm = bpOrdParts[0].parseIntValue()
   let bpOrdPr = bpOrdParts[1].parseIntValue()
   if (bpOrdPr < 0) then throw("Price can't be negative") else
-  let bpOrdUsd = fraction(bpOrdAm, bpOrdPr, MULT8) # can be <=> 0
+  let bpOrdUsd = if (isProd) then bpOrdAm * bpOrdPr else fraction(bpOrdAm, bpOrdPr, MULT8) # can be <=> 0
   let bpInit = if (size(acc._8) > j) then acc._8[j].parseIntValue() else 0 # initial amount in backpack
   let whInit = if (size(acc._9) > j) then acc._9[j].parseIntValue() else 0 # initial amount in warehouse
   let whOrdInit = if (size(acc._10) > j) then acc._10[j] else "0@0"
@@ -202,12 +213,12 @@ func acceptCommon(acc: (List[String], List[String], List[String], Int, Int, Int,
   let whOrdAm = whOrdParts[0].parseIntValue()
   let whOrdPr = whOrdParts[1].parseIntValue()
   if (bpOrdAm != 0 && bpOrdPr != whOrdPr) then throw("Prices of " + acc._11[j] + " don't match! WH price=" + whOrdPr.toString() + ", your price=" + bpOrdPr.toString()) else
-  let whOrdUsd = fraction(whOrdAm, whOrdPr, MULT8) # can be <=> 0
+  let whOrdUsd = if (isProd) then whOrdAm * whOrdPr else fraction(whOrdAm, whOrdPr, MULT8) # can be <=> 0
   let deltaVol = toVolume(bpOrdAm, PRODUCTPKGSIZE, isProd)
   if (bpOrdAm == 0) then { # skip position
     (acc._1 :+ whInit.toString(), acc._2 :+ whOrdInit, acc._3 :+ bpInit.toString(), acc._4, acc._5, acc._6, acc._7 + 1, acc._8, acc._9, acc._10, acc._11, isProd, acc._13)
-  } else if (bpOrdAm > 0) then { # move from wh_shop to bp
-    if (whOrdAm < 0) then { # match => check available amount (throw is not enough); unlock wh volume, add usd
+  } else if (bpOrdAm > 0) then { # move from wh_shop to bp (user buys from shop)
+    if (whOrdAm < 0) then { # match => check available amount (throw if not enough); unlock wh volume, add usd
       if (-whOrdAm < bpOrdAm) then throw("Attempt to buy " + bpOrdAm.toString() + " of " + acc._11[j] + ", but warehouse only sells " + toString(-whOrdAm)) else
       (
         acc._1 :+ whInit.toString(), # wh{Res|Mat|Prod}List (keep old, because sale happened from shop, not wh)
@@ -221,7 +232,7 @@ func acceptCommon(acc: (List[String], List[String], List[String], Int, Int, Int,
     } else { # whOrdAm >= 0, don't match => throw
       throw("Attempt to buy " + acc._11[j] + " while warehouse doesn't sell it")
     }
-  } else { # bpOrdAm < 0, move from bp to wh
+  } else { # bpOrdAm < 0, move from bp to wh (user sells to shop)
     if (whOrdAm > 0) then { # match => check that amounts match; unlock wh volume, subtract usd
       if (whOrdAm < -bpOrdAm) then throw("Attempt to sell " + toString(-bpOrdAm) + " of " + acc._11[j] + ", but warehouse only buys " + toString(whOrdAm)) else
       if (bpInit < -bpOrdAm) then throw("Attempt to sell " + toString(-bpOrdAm) + ", but you only have " + bpInit.toString() + " of " + acc._11[j]) else
@@ -240,6 +251,222 @@ func acceptCommon(acc: (List[String], List[String], List[String], Int, Int, Int,
   }
 }
 
+func sellResourcesCommon(resList: List[String], factoryLocId: String, amounts: List[Int], minPrices: List[Int]) = {
+
+  # updates warehouse and backpack if resType match
+  func adder(acc: (List[IntegerEntry], List[String], Int, Int), j: Int) = {
+    if (amounts[j] > resList[j].parseIntValue()) then throw("You have " + resList[j] + " of " + resTypes[j]
+      + ", but tried to sell " + amounts[j].toString()) else
+    if (amounts[j] < 0) then throw("You tried to sell negative amount of " + resTypes[j] + ": " + amounts[j].toString()) else
+    if (amounts[j] > 0) then {
+      let b = sellInternal(factoryLocId, j, amounts[j], minPrices[j]) # factoryWarehouse action, usdtReceived; (resAmountSold always == amounts[j])
+      (
+        acc._1 :+ b._1, # factoryWarehouse actions
+        acc._2 :+ (parseIntValue(resList[j]) - amounts[j]).toString(), # decrease backpack resource by amounts[j]
+        acc._3 + b._2, # USDT
+        acc._4 + amounts[j] # total res amount
+      )
+    } else
+      (acc._1,
+      acc._2 :+ resList[j], # keep old res amount
+      acc._3,
+      acc._4)
+  }
+  FOLD<6>(ITER6, ([], [], 0, 0), adder) # (factoryActions, newRes, usdtReceived, totalResAmount)
+}
+
+func buyMaterialsCommon(matList: List[String], factoryLocId: String, amounts: List[Int], maxPrices: List[Int]) = {
+  
+  # updates warehouse and backpack if matType match
+  func mUpdater(acc: (List[IntegerEntry], List[String], Int, Int), j: Int) = {
+    if (amounts[j] < 0) then throw("You tried to buy negative amount of " + matTypes[j] + ": " + amounts[j].toString()) else
+    if (amounts[j] > 0) then {
+      let b = buyInternal(factoryLocId, j, amounts[j], maxPrices[j]) # factoryWarehouse action, usdtSpent, materialAmount bought
+      (
+        acc._1 :+ b._1, # factoryWarehouse actions
+        acc._2 :+ (parseIntValue(matList[j]) + b._3).toString(), # increase backpack material
+        acc._3 + b._2, # USDT
+        acc._4 + amounts[j] # total mat amount
+      )
+    } else
+      (acc._1,
+      acc._2 :+ matList[j], # keep old material amount
+      acc._3,
+      acc._4)
+  }
+  FOLD<6>(ITER6, ([], [], 0, 0), mUpdater) # (factoryActions, newMat, usdtSpent, totalMatAmount)
+}
+
+func exchangeResourcesCommon(resList: List[String], matList: List[String], amounts: List[Int]) = {
+  # updates backpack if resType match
+  func exchanger(acc: (List[String], List[String], Int, Int), j: Int) = {
+    let amj = amounts[j]
+    if (amj > resList[j].parseIntValue()) then throw("You have " + resList[j] + " of " + resTypes[j]
+      + ", but tried to exchange " + amj.toString()) else
+    if (amj < 0) then throw("You tried to exchange negative amount of " + resTypes[j] + ": " + amj.toString()) else
+    if (amj > 0) then
+      ( acc._1 :+ (parseIntValue(resList[j]) - amj).toString(), # decrease backpack resource by amounts[j]
+        acc._2 :+ (parseIntValue(matList[j]) + amj).toString(), # increase backpack material
+        acc._3 + fraction(amj, RESOURCEPRICEMIN, MULT8), # USDT
+        acc._4 + amj
+      )
+    else
+      ( acc._1 :+ resList[j], # keep old res amount
+        acc._2 :+ matList[j], # keep old material amount
+        acc._3,
+        acc._4
+      )
+  }
+  FOLD<6>(ITER6, ([], [], 0, 0), exchanger) # (newRes, newMat, usdtSpent, totalAmountConverted)
+}
+
+# usd unlocked from shop order -> transfer to user (user sells items)
+func shop2userActions(usdWh2BpSaldo: Int, callerAddr: String, receivedFee: Int) = {
+  # >=0, part of wh bids (locked usd)
+  if (usdWh2BpSaldo > 0) then {
+    let usdWh2BpFee = fraction(usdWh2BpSaldo, AUCTIONFEE, MULT6) # >=0, fee part of wh bids (locked usd)
+    if (usdWh2BpSaldo - 3 * usdWh2BpFee <= receivedFee) then throw("This trade does not cover delivery cost of " + receivedFee.fixedPoint(6)) else
+    let refByKey = keyAddressRefBy(callerAddr)
+    let refBy = stakingContract.getString(refByKey)
+    let caller = callerAddr.addressFromStringValue()
+    ( if (refBy.isDefined()) then # duck owner's oldie exists
+        [ScriptTransfer(refBy.value().addressFromStringValue(), usdWh2BpFee, usdtAssetId)] # 1% goes to oldie of duck owner
+      else []
+    )
+    :+ ScriptTransfer(caller, usdWh2BpSaldo - 3 * usdWh2BpFee - receivedFee, usdtAssetId) # duck owner (seller) pays 3% fee (gets 3% less)
+    :+ ScriptTransfer(restContract, usdWh2BpFee, usdtAssetId) # 1% goes to rest contract for activities
+  } else { # usdWh2BpSaldo == 0
+    []
+  }
+}
+
+# usd from user -> transfer to shop (user buys items)
+func user2shopActions(usdBp2WhSaldo: Int, pmts: List[AttachedPayment], shopLandOwner: String, spentFee: Int) = {
+  # >=0, sum of bp bids (locked usd)
+  if (usdBp2WhSaldo > 0) then {
+    if (pmts.size() != 1) then throw("exactly 1 payment must be attached") else
+    let pmt = pmts[0]
+    let amt = pmt.amount
+    if (!pmt.assetId.isDefined() || pmt.assetId.value() != usdtAssetId) then throw("USDT payments only!") else
+    let usdtSpentWithFee = usdBp2WhSaldo + spentFee
+    if (amt != usdtSpentWithFee) then throw("Insufficient payment! Attached=" + amt.fixedPoint(6) + ", required=" + usdBp2WhSaldo.fixedPoint(6) + "+" + spentFee.fixedPoint(6) + "(delivery fee)") else
+    if (usdBp2WhSaldo < MINSHOPPAYMENT) then throw("Min shop trade is " + MINSHOPPAYMENT.fixedPoint(6)) else
+    let usdBp2WhFee = fraction(usdBp2WhSaldo, AUCTIONFEE, MULT6) # >=0, fee of sum of bp bids (locked usd)
+    let refByKey = keyAddressRefBy(shopLandOwner)
+    let refBy = stakingContract.getString(refByKey)
+    ( if (refBy.isDefined()) then # shopLand owner's oldie exists
+        [ScriptTransfer(refBy.value().addressFromStringValue(), usdBp2WhFee, usdtAssetId)] # 1% goes to oldie of shopLand owner
+      else []
+    )
+    :+ ScriptTransfer(shopLandOwner.addressFromStringValue(), usdBp2WhSaldo - 3 * usdBp2WhFee, usdtAssetId) # shopLand owner (seller) pays 3% fee (gets 3% less from duck)
+    :+ ScriptTransfer(restContract, usdBp2WhFee, usdtAssetId) # 1% goes to rest contract for activities
+  } else { # usdBp2WhSaldo == 0
+    if (pmts.size() != 0) then throw("No payments needed") else
+    []
+  }
+}
+
+func acceptShopOrderCommon(shopLandAssetId: String, callerAddr: String, bpOrderStr: String, bpResList: List[String], bpMatList: List[String], bpProdList: List[String]) = {
+  let landAsset = assetInfo(shopLandAssetId.fromBase58String()).value()
+  if (!isDefined(stakingContract.getInteger(keyStakedTimeByAssetId(shopLandAssetId)))) then throw("NFT " + landAsset.name + " is not staked") else
+  let shopLandOwner = stakingContract.getString(keyLandAssetIdToOwner(shopLandAssetId)).valueOrErrorMessage("NFT " + landAsset.name + " is orphaned")
+  if (shopLandOwner == callerAddr) then throw("You cannot trade with yourself") else
+  let bpOrderParts = split_4C(bpOrderStr, ":")
+  if (bpOrderParts.size() != 3) then throw("bpOrderStr should contain exactly 2 ':' separators") else
+  let bpOrdRes = bpOrderParts[0].split("_")
+  let bpOrdMat = bpOrderParts[1].split("_")
+  let bpOrdProd = if (bpOrderParts[2] == "") then [] else bpOrderParts[2].split_4C("_")
+  if (bpOrdRes.size() != NUMRES) then throw("All 6 resources should be passed") else
+  if (bpOrdMat.size() != NUMRES) then throw("All 6 materials should be passed") else
+
+  let wh = stakingContract.invoke("getWarehouseREADONLY", [shopLandAssetId], []).asString()
+  let currentWh = split_4C(wh, ":")
+  let currWhRes = currentWh[whIdxRes].split("_") # resources already in warehouse
+  let currWhMat = currentWh[whIdxMat].split("_") # materials already in warehouse
+  let currWhProd = if (currentWh[whIdxProd] == "") then [] else currentWh[whIdxProd].split_4C("_") # products already in warehouse
+
+  let currWhLockedVol = currentWh[whIdxLOFT].split("_")[volLocked].parseIntValue()
+
+  # whOrd is "current order for shopLandAssetId's warehouse"
+  let ordKey = keyOrderByLand(shopLandAssetId)
+  let whOrd = getOrder(ordKey)
+  let whOrdRes = whOrd[ordIdxRes].split("_") # res@price currently in order
+  let whOrdMat = whOrd[ordIdxMat].split("_") # mat@price currently in order
+  let whOrdProd = if (whOrd[ordIdxProd] == "") then [] else whOrd[ordIdxProd].split_4C("_") # prod@price currently in order
+
+  # acc: (wh{Res|Mat|Prod}List, whOrder{Res|Mat|Prod}List, bp{Res|Mat|Prod}List, whVol2unlock, usdWh2Bp, usdBp2Wh, iterIndex,
+  #       initialBp{Res|Mat|Prod}List, initialWh{Res|Mat|Prod}List, initialWhOrder{Res|Mat|Prod}List, itemNames, isProduct, totalResMatProd)
+  let r = FOLD<6>(bpOrdRes, ([], [], [], 0, 0, 0, 0, bpResList, currWhRes, whOrdRes, resTypes, false, 0), acceptCommon)
+  let m = FOLD<6>(bpOrdMat, ([], [], [], r._4, r._5, r._6, 0, bpMatList, currWhMat, whOrdMat, matTypes, false, r._13), acceptCommon)
+  let p = if (bpOrdProd.size() != 0) then 
+    (FOLD<50>(bpOrdProd, ([], [], [], m._4, m._5, m._6, 0, bpProdList, currWhProd, whOrdProd, prodTypes, true, m._13), acceptCommon)) 
+    else (currWhProd, whOrdProd, bpProdList, m._4, m._5, m._6, 0, bpProdList, currWhProd, whOrdProd, prodTypes, true, m._13)
+
+  let volSaldo = p._4 # always positive or 0, means locked WH volume to free
+  let newLockedVol = if (currWhLockedVol - volSaldo < 0) then 0 else currWhLockedVol - volSaldo
+  let whStr = makeString_2C([currentWh[whIdxLevels], makeString(r._1, "_"), makeString(m._1, "_"), makeString_2C(p._1, "_"), newLockedVol.toString()], ":")
+  let newWhOrdStr = makeString_2C([makeString(r._2, "_"), makeString(m._2, "_"), makeString_2C(p._2, "_")], ":")
+  let whSave = stakingContract.invoke("saveWarehouse", [whStr, shopLandAssetId], []).asString()
+  let accStatsResult = stakingContract.invoke("updateAccStats", [shopLandOwner, fraction(xpShop, p._13, MULT8)], []).asInt()
+  # (shopAction, newUserRes, newUserMat, newUserProd, usdWh2Bp, usdBp2Wh, totalResMatProd, shopLandOwner, whSave, accStatsResult)
+  (StringEntry(ordKey, newWhOrdStr), r._3, m._3, p._3, p._5, p._6, p._13, shopLandOwner, whSave, accStatsResult)
+}
+
+func sellResourcesWorldInternal(amount: Int) = {
+  let oneRes = amount / 30
+  let oneFactoryAmounts = [oneRes, oneRes, oneRes, oneRes, oneRes, oneRes]
+  let s = oneRes.toString()
+  let resList = [s, s, s, s, s, s]
+  let minPrices = [0, 0, 0, 0, 0, 0]
+
+  func oneFactory(acc: (List[IntegerEntry], Int, Int), continent: String) = {
+    let x = sellResourcesCommon(resList, continent, oneFactoryAmounts, minPrices) # (List[factoryAction], newRes, usdtReceived, totalRes)
+    (acc._1 ++ x._1, acc._2 + x._3, acc._3 + x._4) # factoryActions, usdtReceived, totalRes
+  }
+  let (factoryActions, usdtReceived, totalRes) = FOLD<5>(continents, ([], 0, 0), oneFactory)
+
+  let fee = fraction(usdtReceived, DELIVERY_FEE, MULT6)
+  let activitiesAmount = usdtReceived / 100
+  let usdtLeft = usdtReceived - activitiesAmount - fee
+  (factoryActions, usdtLeft, fee, activitiesAmount, totalRes)
+}
+
+func craftGoodsCommon(matList: List[String], prodList: List[String], manufactoryContinent: String, productIdx: Int, quantity: Int) = {
+  if (quantity <= 0) then throw("Quantity should be positive") else
+  if (productIdx < 0 || productIdx >= productionMatrix.size()) then throw("Unknown product idx=" + productIdx.toString()) else
+  let recipe = productionMatrix[productIdx].split("_")
+  if (recipe.size() != RECIPESIZE) then throw("Fatal: unknown recipe: " + productionMatrix[productIdx]) else
+  let productContIdx = recipe[rIdxContinent].parseIntValue()
+  if (continents[productContIdx] != manufactoryContinent) then throw("This product is available in " + continents[productContIdx] + ", not in " + manufactoryContinent) else
+
+  # Iterate backpack products, pad backpack with zeroes to match recipes size; add quantity of needed product
+  func filler(acc: (List[String], Int), ignoredItem: String) = {
+    let n = acc._2 # counter of products in backpack < productionMatrix.size()
+    let xs = if (n < prodList.size()) then prodList[n] else "0"
+    let x = xs.parseIntValue()
+    let amount = quantity * PRODUCTPKGSIZE
+    let y = if (n == productIdx) then toString(x + amount) else xs
+    (acc._1 :+ y, n + 1)
+  }
+  let newProd = (FOLD<50>(productionMatrix, ([], 0), filler))._1 # list of updated products in backpack
+  # Iterate materials
+  func producer(acc: (List[String], Int), j: Int) = {
+    let needMat = recipe[j].parseIntValue() * MULT5 * quantity * recipe[rIdxCoeff].parseIntValue()
+    let haveMat = matList[j].parseIntValue()
+    if (needMat > haveMat) then throw("You have " + haveMat.fixedPoint(8) + " of " + matTypes[j]
+      + ", but recipe requires " + needMat.fixedPoint(8) + " for quantity " + quantity.toString()) else
+    if (needMat > 0) then {
+      (acc._1 :+ toString(haveMat - needMat), # decrease backpack material by needMat
+      acc._2 + needMat)
+    } else
+      (acc._1 :+ matList[j], # keep old mat amount
+      acc._2)
+  }
+  let merged = FOLD<6>(ITER6, ([], 0), producer)
+  (merged._1, newProd, merged._2)
+  # (newMat, newProd, matSpent)
+}
+
 @Callable(i)
 func recalcLockedVolumeREADONLY(landAssetId: String, wh: List[String]) = {
   let currentOrd = getOrder(keyOrderByLand(landAssetId))
@@ -256,200 +483,402 @@ func constructorV1(restAddr: String) = {
 # sell a list of 6 resources to factory
 @Callable(i)
 func sellResources(amounts: List[Int], minPrices: List[Int]) = {
-  let prologResult = prolog()
+  strict prologResult = prolog()
   let duckAssetId = stakingContract.getString(keyStakedDuckByOwner(i.caller.toString())).valueOrErrorMessage("You don't have a duck staked")
   if (i.payments.size() != 0) then throw("sellResources doesn't require any payments") else
   let curLocation = stakingContract.getString(keyDuckLocation(duckAssetId)).valueOrElse(DEFAULTLOCATION).split("_")
   if (curLocation[locIdxType] != "F") then throw("Duck location type should be Factory, but is " + curLocation[locIdxType]) else
-  let locId = curLocation[locIdxId]
   let currentPack = getBackpack(keyBackpackByDuck(duckAssetId))
   let resList = currentPack[bpIdxRes].split("_")
 
-  # updates warehouse and backpack if resType match
-  func adder(acc: (List[IntegerEntry], List[String], Int, Int), j: Int) = {
-    if (amounts[j] > resList[j].parseIntValue()) then throw("You have " + resList[j] + " of " + resTypes[j]
-      + ", but tried to sell " + amounts[j].toString()) else
-    if (amounts[j] < 0) then throw("You tried to sell negative amount of " + resTypes[j] + ": " + amounts[j].toString()) else
-    if (amounts[j] > 0) then {
-      let b = sellInternal(locId, j, amounts[j], minPrices[j]) # warehouse action, usdtReceived; (resAmountSold always == amounts[j])
-      (
-        acc._1 :+ b._1, # warehouse new amount
-        acc._2 :+ (parseIntValue(resList[j]) - amounts[j]).toString(), # decrease backpack resource by amounts[j]
-        acc._3 + b._2, # USDT
-        acc._4 + amounts[j]
-      )
-    } else
-      (acc._1,
-      acc._2 :+ resList[j], # keep old res amount
-      acc._3,
-      acc._4)
-  }
+  let (factoryActions, newRes, usdtReceived, totalRes) = sellResourcesCommon(resList, curLocation[locIdxId], amounts, minPrices)
 
-  let merged = FOLD<6>([0, 1, 2, 3, 4, 5], ([], [], 0, 0), adder)
-  let newPack = makeString([currentPack[bpIdxLevel], makeString(merged._2, "_"), currentPack[bpIdxMat], currentPack[bpIdxProd]], ":")
-  let result = stakingContract.invoke("updateBackpack", [duckAssetId, newPack], []).asString()
-  let statsResult = stakingContract.invoke("updateDuckStats", [duckAssetId, fraction(xpTrade, merged._4, MULT8)], []).asInt()
+  let activitiesAmount = usdtReceived / 100
+  let newPack = makeString_2C([currentPack[bpIdxLevel], makeString(newRes, "_"), currentPack[bpIdxMat], currentPack[bpIdxProd]], ":")
+  let backpackResult = stakingContract.invoke("updateBackpack", [duckAssetId, newPack], []).asString()
+  let statsResult = stakingContract.invoke("updateDuckStats", [duckAssetId, fraction(xpTrade, totalRes, MULT8)], []).asInt()
 
-  (merged._1 :+ ScriptTransfer(i.caller, merged._3, usdtAssetId),
-    (result, prologResult, statsResult))
+  (factoryActions
+  :+ ScriptTransfer(i.caller, usdtReceived - activitiesAmount, usdtAssetId) 
+  :+ ScriptTransfer(restContract, activitiesAmount, usdtAssetId),
+    (backpackResult, prologResult, statsResult))
+}
+
+# callback for acres contract
+@Callable(i)
+func sellResourcesWorld(addr: String, amount: Int) = {
+  if (i.caller != acresContract) then throw("Permission denied") else
+  let (factoryActions, usdtLeft, fee, activitiesAmount, totalRes) = sellResourcesWorldInternal(amount)
+
+  # NB! caller dApp need to send user usdtLeft/10 ACRES
+  if (usdtLeft <= 0) then throw("This trade does not cover delivery cost of " + fee.fixedPoint(6)) else
+  let statsResult = stakingContract.invoke("updateAccStats", [addr, fraction(xpTrade, totalRes, MULT8)], []).asInt()
+
+  (factoryActions
+  :+ IntegerEntry(deliveryFundKey, getInteger(deliveryFundKey).valueOrElse(0) + fee)
+  :+ ScriptTransfer(restContract, activitiesAmount, usdtAssetId)
+  :+ ScriptTransfer(investFundContract, usdtLeft, usdtAssetId), (usdtLeft, statsResult))
+}
+
+@Callable(i)
+func sellResourcesWorldREADONLY(amount: Int) = {
+  let usdtLeft = sellResourcesWorldInternal(amount)._2
+
+  ([], usdtLeft)
+}
+
+# sell a list of 6 resources to factory
+@Callable(i)
+func sellResourcesDuckDelivery(amounts: List[Int], minPrices: List[Int], factoryContinent: String) = {
+  strict prologResult = prolog()
+  let duckAssetId = stakingContract.getString(keyStakedDuckByOwner(i.caller.toString())).valueOrErrorMessage("You don't have a duck staked")
+  if (i.payments.size() != 0) then throw("sellResources doesn't require any payments") else
+  let currentPack = getBackpack(keyBackpackByDuck(duckAssetId))
+  let resList = currentPack[bpIdxRes].split("_")
+
+  let (factoryActions, newRes, usdtReceived, totalRes) = sellResourcesCommon(resList, factoryContinent, amounts, minPrices)
+
+  let newPack = makeString_2C([currentPack[bpIdxLevel], makeString(newRes, "_"), currentPack[bpIdxMat], currentPack[bpIdxProd]], ":")
+  let backpackResult = stakingContract.invoke("updateBackpack", [duckAssetId, newPack], []).asString()
+  let statsResult = stakingContract.invoke("updateDuckStats", [duckAssetId, fraction(xpTrade, totalRes, MULT8)], []).asInt()
+
+  let feePart = fraction(usdtReceived, DELIVERY_FEE, MULT6)
+  let fee = max([feePart, MIN_USDT_FEE_DELIVERY])
+  let activitiesAmount = usdtReceived / 100
+  if (usdtReceived - activitiesAmount <= fee) then throw("This trade does not cover delivery cost of " + fee.fixedPoint(6)) else
+  let fundTotal = getInteger(deliveryFundKey).valueOrElse(0)
+
+  (factoryActions
+  :+ ScriptTransfer(i.caller, usdtReceived - activitiesAmount - fee, usdtAssetId) 
+  :+ IntegerEntry(deliveryFundKey, fundTotal + fee) 
+  :+ ScriptTransfer(restContract, activitiesAmount, usdtAssetId),
+    (backpackResult, prologResult, statsResult))
+}
+
+# sell a list of 6 resources to factory
+@Callable(i)
+func sellResourcesLandDelivery(amounts: List[Int], minPrices: List[Int], landAssetId: String, factoryContinent: String) = {
+  strict prologResult = prolog()
+  if (i.payments.size() != 0) then throw("sellResources doesn't require any payments") else
+  let user = i.caller
+  let addr = user.toString()
+  let asset = assetInfo(landAssetId.fromBase58String()).value()
+  if (!isDefined(stakingContract.getInteger(keyStakedTimeByAssetId(landAssetId)))) then throw("NFT " + asset.name + " is not staked") else
+  let owner = stakingContract.getString(keyLandAssetIdToOwner(landAssetId)).valueOrErrorMessage("NFT " + asset.name + " is orphaned")
+  if (owner != addr) then throw(LANDPREFIX + " is not yours") else
+
+  let wh = stakingContract.invoke("getWarehouseREADONLY", [landAssetId], []).asString()
+  let currentWh = split_4C(wh, ":")
+  let resList = currentWh[whIdxRes].split("_")
+
+  let (factoryActions, newRes, usdtReceived, totalRes) = sellResourcesCommon(resList, factoryContinent, amounts, minPrices)
+
+  let whStr = makeString_2C([currentWh[whIdxLevels], makeString(newRes, "_"), currentWh[whIdxMat], currentWh[whIdxProd], currentWh[whIdxLOFT]], ":")
+  let whSave = stakingContract.invoke("saveWarehouse", [whStr, landAssetId], []).asString()
+  let statsResult = stakingContract.invoke("updateAccStats", [addr, fraction(xpTrade, totalRes, MULT8)], []).asInt()
+
+  let feePart = fraction(usdtReceived, DELIVERY_FEE, MULT6)
+  let fee = max([feePart, MIN_USDT_FEE_DELIVERY])
+  let activitiesAmount = usdtReceived / 100
+  if (usdtReceived - activitiesAmount <= fee) then throw("This trade does not cover delivery cost of " + fee.fixedPoint(6)) else
+  let fundTotal = getInteger(deliveryFundKey).valueOrElse(0)
+
+  (factoryActions 
+  :+ ScriptTransfer(i.caller, usdtReceived - activitiesAmount - fee, usdtAssetId) 
+  :+ IntegerEntry(deliveryFundKey, fundTotal + fee)
+  :+ ScriptTransfer(restContract, activitiesAmount, usdtAssetId),
+    (whSave, prologResult, statsResult))
 }
 
 @Callable(i)
 func buyMaterials(amounts: List[Int], maxPrices: List[Int]) = {
-  let prologResult = prolog()
+  strict prologResult = prolog()
   let duckAssetId = stakingContract.getString(keyStakedDuckByOwner(i.caller.toString())).valueOrErrorMessage("You don't have a duck staked")
   if (i.payments.size() != 1) then throw("exactly 1 payment must be attached") else
   let pmt = i.payments[0]
   let amt = pmt.amount
-  let pmtAssetId = pmt.assetId.valueOrErrorMessage("WAVES can't be used as payment")
-  if (pmtAssetId != usdtAssetId) then throw("USDT payments only!") else
+  if (!pmt.assetId.isDefined() || pmt.assetId.value() != usdtAssetId) then throw("USDT payments only!") else
   let curLocation = stakingContract.getString(keyDuckLocation(duckAssetId)).valueOrElse(DEFAULTLOCATION).split("_")
   if (curLocation[locIdxType] != "F") then throw("Duck location type should be Factory, but is " + curLocation[locIdxType]) else
-  let locId = curLocation[locIdxId]
   let currentPack = getBackpack(keyBackpackByDuck(duckAssetId))
   let matList = currentPack[bpIdxMat].split("_")
 
-  # updates warehouse and backpack if resType match
-  func mUpdater(acc: (List[IntegerEntry], List[String], Int, Int), j: Int) = {
-    if (amounts[j] < 0) then throw("You tried to buy negative amount of " + matTypes[j] + ": " + amounts[j].toString()) else
-    if (amounts[j] > 0) then {
-      let b = buyInternal(locId, j, amounts[j], maxPrices[j]) # warehouse action, usdtSpent, materialAmount bought
-      (
-        acc._1 :+ b._1, # warehouse set new amount action
-        acc._2 :+ (parseIntValue(matList[j]) + b._3).toString(), # increase backpack material
-        acc._3 + b._2, # USDT
-        acc._4 + amounts[j]
-      )
-    } else
-      (acc._1,
-      acc._2 :+ matList[j], # keep old material amount
-      acc._3,
-      acc._4)
-  }
+  let (factoryActions, newMat, usdtSpent, totalMat) = buyMaterialsCommon(matList, curLocation[locIdxId], amounts, maxPrices)
 
-  let merged = FOLD<6>([0, 1, 2, 3, 4, 5], ([], [], 0, 0), mUpdater)
-  if (merged._3 > amt) then throw("Insufficient payment! Attached=" + amt.toString() + ", required=" + toString(merged._3)) else
-  let newPack = makeString([currentPack[bpIdxLevel], currentPack[bpIdxRes], makeString(merged._2, "_"), currentPack[bpIdxProd]], ":")
-  let result = stakingContract.invoke("updateBackpack", [duckAssetId, newPack], []).asString()
-  let rest = if (amt - merged._3 > 0) then [ScriptTransfer(i.caller, amt - merged._3, usdtAssetId)] else []
-  let activitiesAmount = merged._3 / 100
-
-  let statsResult = stakingContract.invoke("updateDuckStats", [duckAssetId, fraction(xpTrade, merged._4, MULT8)], []).asInt()
+  if (usdtSpent > amt) then throw("Insufficient payment! Attached=" + amt.fixedPoint(6) + ", required=" + usdtSpent.fixedPoint(6)) else
+  let newPack = makeString([currentPack[bpIdxLevel], currentPack[bpIdxRes], makeString(newMat, "_"), currentPack[bpIdxProd]], ":")
+  let backpackResult = stakingContract.invoke("updateBackpack", [duckAssetId, newPack], []).asString()
+  let rest = if (amt - usdtSpent > 0) then [ScriptTransfer(i.caller, amt - usdtSpent, usdtAssetId)] else []
+  let activitiesAmount = usdtSpent / 100
+  let statsResult = stakingContract.invoke("updateDuckStats", [duckAssetId, fraction(xpTrade, totalMat, MULT8)], []).asInt()
   
-  (merged._1 ++ rest :+ ScriptTransfer(restContract, activitiesAmount, usdtAssetId),
-    (result, prologResult, statsResult))
+  (factoryActions 
+  ++ rest 
+  :+ ScriptTransfer(restContract, activitiesAmount, usdtAssetId),
+    (backpackResult, prologResult, statsResult))
+}
+
+@Callable(i)
+func buyMaterialsDuckDelivery(amounts: List[Int], maxPrices: List[Int], factoryContinent: String) = {
+  strict prologResult = prolog()
+  let duckAssetId = stakingContract.getString(keyStakedDuckByOwner(i.caller.toString())).valueOrErrorMessage("You don't have a duck staked")
+  if (i.payments.size() != 1) then throw("exactly 1 payment must be attached") else
+  let pmt = i.payments[0]
+  let amt = pmt.amount
+  if (!pmt.assetId.isDefined() || pmt.assetId.value() != usdtAssetId) then throw("USDT payments only!") else
+  let currentPack = getBackpack(keyBackpackByDuck(duckAssetId))
+  let matList = currentPack[bpIdxMat].split("_")
+
+  let (factoryActions, newMat, usdtSpent, totalMat) = buyMaterialsCommon(matList, factoryContinent, amounts, maxPrices)
+
+  let newPack = makeString([currentPack[bpIdxLevel], currentPack[bpIdxRes], makeString(newMat, "_"), currentPack[bpIdxProd]], ":")
+  let backpackResult = stakingContract.invoke("updateBackpack", [duckAssetId, newPack], []).asString()
+  let statsResult = stakingContract.invoke("updateDuckStats", [duckAssetId, fraction(xpTrade, totalMat, MULT8)], []).asInt()
+
+  let feePart = fraction(usdtSpent, DELIVERY_FEE, MULT6)
+  let fee = max([feePart, MIN_USDT_FEE_DELIVERY])
+  let usdtSpentWithFee = usdtSpent + fee
+  if (usdtSpentWithFee > amt) then throw("Insufficient payment! Attached=" + amt.fixedPoint(6) + ", required=" + usdtSpent.fixedPoint(6) + "+" + fee.fixedPoint(6) + "(delivery fee)") else
+  let rest = if (amt - usdtSpentWithFee > 0) then [ScriptTransfer(i.caller, amt - usdtSpentWithFee, usdtAssetId)] else []
+  let activitiesAmount = usdtSpent / 100
+  let fundTotal = getInteger(deliveryFundKey).valueOrElse(0)
+
+  (factoryActions 
+  ++ rest 
+  :+ ScriptTransfer(restContract, activitiesAmount, usdtAssetId) 
+  :+ IntegerEntry(deliveryFundKey, fundTotal + fee),
+    (backpackResult, prologResult, statsResult))
+}
+
+@Callable(i)
+func buyMaterialsLandDelivery(amounts: List[Int], maxPrices: List[Int], landAssetId: String, factoryContinent: String) = {
+  strict prologResult = prolog()
+  if (i.payments.size() != 1) then throw("exactly 1 payment must be attached") else
+  let pmt = i.payments[0]
+  let amt = pmt.amount
+  if (!pmt.assetId.isDefined() || pmt.assetId.value() != usdtAssetId) then throw("USDT payments only!") else
+  let user = i.caller
+  let addr = user.toString()
+  let asset = assetInfo(landAssetId.fromBase58String()).value()
+  if (!isDefined(stakingContract.getInteger(keyStakedTimeByAssetId(landAssetId)))) then throw("NFT " + asset.name + " is not staked") else
+  let owner = stakingContract.getString(keyLandAssetIdToOwner(landAssetId)).valueOrErrorMessage("NFT " + asset.name + " is orphaned")
+  if (owner != addr) then throw(LANDPREFIX + " is not yours") else
+
+  let wh = stakingContract.invoke("getWarehouseREADONLY", [landAssetId], []).asString()
+  let currentWh = split_4C(wh, ":")
+  let matList = currentWh[whIdxMat].split("_")
+
+  let (factoryActions, newMat, usdtSpent, totalMat) = buyMaterialsCommon(matList, factoryContinent, amounts, maxPrices)
+
+  let whStr = makeString_2C([currentWh[whIdxLevels], currentWh[whIdxRes], makeString(newMat, "_"), currentWh[whIdxProd], currentWh[whIdxLOFT]], ":")
+  let whSave = stakingContract.invoke("saveWarehouse", [whStr, landAssetId], []).asString()
+  let statsResult = stakingContract.invoke("updateAccStats", [addr, fraction(xpTrade, totalMat, MULT8)], []).asInt()
+
+  let feePart = fraction(usdtSpent, DELIVERY_FEE, MULT6)
+  let fee = max([feePart, MIN_USDT_FEE_DELIVERY])
+  let usdtSpentWithFee = usdtSpent + fee
+  if (usdtSpentWithFee > amt) then throw("Insufficient payment! Attached=" + amt.fixedPoint(6) + ", required=" + usdtSpent.fixedPoint(6) + "+" + fee.fixedPoint(6) + "(delivery fee)") else
+  let rest = if (amt - usdtSpentWithFee > 0) then [ScriptTransfer(i.caller, amt - usdtSpentWithFee, usdtAssetId)] else []
+  let activitiesAmount = usdtSpent / 100
+  let fundTotal = getInteger(deliveryFundKey).valueOrElse(0)
+
+  (factoryActions 
+  ++ rest 
+  :+ ScriptTransfer(restContract, activitiesAmount, usdtAssetId) 
+  :+ IntegerEntry(deliveryFundKey, fundTotal + fee),
+    (whSave, prologResult, statsResult))
 }
 
 # instant exchange a list of 6 resources + money for materials on factory
 @Callable(i)
 func exchangeResources(amounts: List[Int]) = {
-  let prologResult = prolog()
+  strict prologResult = prolog()
   let duckAssetId = stakingContract.getString(keyStakedDuckByOwner(i.caller.toString())).valueOrErrorMessage("You don't have a duck staked")
   if (i.payments.size() != 1) then throw("exactly 1 payment must be attached") else
   let pmt = i.payments[0]
   let amt = pmt.amount
-  let pmtAssetId = pmt.assetId.valueOrErrorMessage("WAVES can't be used as payment")
-  if (pmtAssetId != usdtAssetId) then throw("USDT payments only!") else
+  if (!pmt.assetId.isDefined() || pmt.assetId.value() != usdtAssetId) then throw("USDT payments only!") else
   let curLocation = stakingContract.getString(keyDuckLocation(duckAssetId)).valueOrElse(DEFAULTLOCATION).split("_")
   if (curLocation[locIdxType] != "F") then throw("Duck location type should be Factory, but is " + curLocation[locIdxType]) else
-  let locId = curLocation[locIdxId]
+  
   let currentPack = getBackpack(keyBackpackByDuck(duckAssetId))
   let resList = currentPack[bpIdxRes].split("_")
   let matList = currentPack[bpIdxMat].split("_")
 
-  # updates backpack if resType match
-  func exchanger(acc: (List[String], List[String], Int, List[IntegerEntry], Int), j: Int) = {
-    let whKey = keyFactoryWarehouseByIdAndType(locId, j)
-    let w0 = getInteger(whKey).valueOrElse(0)
+  let (newRes, newMat, usdtSpent, totalAmountConverted) = exchangeResourcesCommon(resList, matList, amounts)
 
-    let amj = amounts[j]
-    if (amj > resList[j].parseIntValue()) then throw("You have " + resList[j] + " of " + resTypes[j]
-      + ", but tried to exchange " + amj.toString()) else
-    if (amj < 0) then throw("You tried to exchange negative amount of " + resTypes[j] + ": " + amj.toString()) else
-    if (amj > 0) then
-      ( acc._1 :+ (parseIntValue(resList[j]) - amj).toString(), # decrease backpack resource by amounts[j]
-        acc._2 :+ (parseIntValue(matList[j]) + amj).toString(), # increase backpack material
-        acc._3 + fraction(amj, RESOURCEPRICEMIN, MULT8), # USDT
-        acc._4 :+ IntegerEntry(whKey, w0),
-        acc._5 + amj
-      )
-    else
-      ( acc._1 :+ resList[j], # keep old res amount
-        acc._2 :+ matList[j], # keep old material amount
-        acc._3,
-        acc._4,
-        acc._5
-      )
-  }
-  let merged = FOLD<6>([0, 1, 2, 3, 4, 5], ([], [], 0, [], 0), exchanger)
-  if (merged._3 > amt) then throw("Insufficient payment! Attached=" + amt.toString() + ", required=" + toString(merged._3)) else
-  let newPack = makeString([currentPack[bpIdxLevel], makeString(merged._1, "_"), makeString(merged._2, "_"), currentPack[bpIdxProd]], ":")
-  let result = stakingContract.invoke("updateBackpack", [duckAssetId, newPack], []).asString()
-  let rest = if (amt - merged._3 > 0) then [ScriptTransfer(i.caller, amt - merged._3, usdtAssetId)] else []
-  let activitiesAmount = merged._3 / 100
+  if (usdtSpent > amt) then throw("Insufficient payment! Attached=" + amt.fixedPoint(6) + ", required=" + usdtSpent.fixedPoint(6)) else
+  let newPack = makeString([currentPack[bpIdxLevel], makeString(newRes, "_"), makeString(newMat, "_"), currentPack[bpIdxProd]], ":")
+  let backpackResult = stakingContract.invoke("updateBackpack", [duckAssetId, newPack], []).asString()
+  let rest = if (amt - usdtSpent > 0) then [ScriptTransfer(i.caller, amt - usdtSpent, usdtAssetId)] else []
+  let activitiesAmount = usdtSpent / 100
+  let statsResult = stakingContract.invoke("updateDuckStats", [duckAssetId, fraction(xpTrade, totalAmountConverted, MULT8)], []).asInt()
 
-  let statsResult = stakingContract.invoke("updateDuckStats", [duckAssetId, fraction(xpTrade, merged._5, MULT8)], []).asInt()
+  (rest :+ ScriptTransfer(restContract, activitiesAmount, usdtAssetId),
+    (backpackResult, prologResult, statsResult))
+}
 
-  (rest ++ merged._4 :+ ScriptTransfer(restContract, activitiesAmount, usdtAssetId),
-    (result, prologResult, statsResult))
+@Callable(i)
+func exchangeResourcesDuckDelivery(amounts: List[Int]) = {
+  strict prologResult = prolog()
+  let duckAssetId = stakingContract.getString(keyStakedDuckByOwner(i.caller.toString())).valueOrErrorMessage("You don't have a duck staked")
+  if (i.payments.size() != 1) then throw("exactly 1 payment must be attached") else
+  let pmt = i.payments[0]
+  let amt = pmt.amount
+  if (!pmt.assetId.isDefined() || pmt.assetId.value() != usdtAssetId) then throw("USDT payments only!") else
+  let currentPack = getBackpack(keyBackpackByDuck(duckAssetId))
+  let resList = currentPack[bpIdxRes].split("_")
+  let matList = currentPack[bpIdxMat].split("_")
+
+  let (newRes, newMat, usdtSpent, totalAmountConverted) = exchangeResourcesCommon(resList, matList, amounts)
+
+  let feePart = fraction(usdtSpent, DELIVERY_FEE15, MULT6) # 1.5 times usual fee
+  let fee = max([feePart, MIN_USDT_FEE_DELIVERY15])
+  let usdtSpentWithFee = usdtSpent + fee
+  if (usdtSpentWithFee > amt) then throw("Insufficient payment! Attached=" + amt.fixedPoint(6) + ", required=" + usdtSpent.fixedPoint(6) + "+" + fee.fixedPoint(6) + "(delivery fee)") else
+  let newPack = makeString([currentPack[bpIdxLevel], makeString(newRes, "_"), makeString(newMat, "_"), currentPack[bpIdxProd]], ":")
+  let backpackResult = stakingContract.invoke("updateBackpack", [duckAssetId, newPack], []).asString()
+  let rest = if (amt - usdtSpentWithFee > 0) then [ScriptTransfer(i.caller, amt - usdtSpentWithFee, usdtAssetId)] else []
+  let activitiesAmount = usdtSpent / 100
+  let statsResult = stakingContract.invoke("updateDuckStats", [duckAssetId, fraction(xpTrade, totalAmountConverted, MULT8)], []).asInt()
+  let fundTotal = getInteger(deliveryFundKey).valueOrElse(0)
+
+  (rest 
+  :+ ScriptTransfer(restContract, activitiesAmount, usdtAssetId)
+  :+ IntegerEntry(deliveryFundKey, fundTotal + fee),
+    (backpackResult, prologResult, statsResult))
+}
+
+@Callable(i)
+func exchangeResourcesLandDelivery(amounts: List[Int], landAssetId: String) = {
+  strict prologResult = prolog()
+  if (i.payments.size() != 1) then throw("exactly 1 payment must be attached") else
+  let pmt = i.payments[0]
+  let amt = pmt.amount
+  if (!pmt.assetId.isDefined() || pmt.assetId.value() != usdtAssetId) then throw("USDT payments only!") else
+  let user = i.caller
+  let addr = user.toString()
+  let asset = assetInfo(landAssetId.fromBase58String()).value()
+  if (!isDefined(stakingContract.getInteger(keyStakedTimeByAssetId(landAssetId)))) then throw("NFT " + asset.name + " is not staked") else
+  let owner = stakingContract.getString(keyLandAssetIdToOwner(landAssetId)).valueOrErrorMessage("NFT " + asset.name + " is orphaned")
+  if (owner != addr) then throw(LANDPREFIX + " is not yours") else
+  let wh = stakingContract.invoke("getWarehouseREADONLY", [landAssetId], []).asString()
+  let currentWh = split_4C(wh, ":")
+  let resList = currentWh[whIdxRes].split("_")
+  let matList = currentWh[whIdxMat].split("_")
+
+  let (newRes, newMat, usdtSpent, totalAmountConverted) = exchangeResourcesCommon(resList, matList, amounts)
+
+  let whStr = makeString_2C([currentWh[whIdxLevels], makeString(newRes, "_"), makeString(newMat, "_"), currentWh[whIdxProd], currentWh[whIdxLOFT]], ":")
+  let whSave = stakingContract.invoke("saveWarehouse", [whStr, landAssetId], []).asString()
+  let statsResult = stakingContract.invoke("updateAccStats", [addr, fraction(xpTrade, totalAmountConverted, MULT8)], []).asInt()
+  let feePart = fraction(usdtSpent, DELIVERY_FEE15, MULT6) # 1.5 times usual fee
+  let fee = max([feePart, MIN_USDT_FEE_DELIVERY15])
+  let usdtSpentWithFee = usdtSpent + fee
+  if (usdtSpentWithFee > amt) then throw("Insufficient payment! Attached=" + amt.fixedPoint(6) + ", required=" + usdtSpent.fixedPoint(6) + "+" + fee.fixedPoint(6) + "(delivery fee)") else
+  let rest = if (amt - usdtSpentWithFee > 0) then [ScriptTransfer(i.caller, amt - usdtSpentWithFee, usdtAssetId)] else []
+  let activitiesAmount = usdtSpent / 100
+  let fundTotal = getInteger(deliveryFundKey).valueOrElse(0)
+
+  (rest 
+  :+ ScriptTransfer(restContract, activitiesAmount, usdtAssetId)
+  :+ IntegerEntry(deliveryFundKey, fundTotal + fee),
+    (whSave, prologResult, statsResult))
 }
 
 # productIdx: index within production matrix
 # quantity: amount of packages to buy
 @Callable(i)
 func craftGoods(productIdx: Int, quantity: Int) = {
-  let prologResult = prolog()
+  strict prologResult = prolog()
   if (i.payments.size() != 1) then throw("exactly 1 payment must be attached") else
   let pmt = i.payments[0]
   let amt = pmt.amount
-  let pmtAssetId = pmt.assetId.valueOrErrorMessage("WAVES can't be used as payment")
-  if (pmtAssetId != usdtAssetId) then throw("USDT payments only!") else
-  if (amt != MULT6) then throw("exactly 1 USDT must be attached as payment") else
+  if (!pmt.assetId.isDefined() || pmt.assetId.value() != usdtAssetId) then throw("USDT payments only!") else
+  if (amt != MULT6) then throw("exactly " + CRAFT_USDT_COST.fixedPoint(6) + " USDT must be attached as payment") else
 
-  if (quantity <= 0) then throw("Quantity should be positive") else
   let duckAssetId = stakingContract.getString(keyStakedDuckByOwner(i.caller.toString())).valueOrErrorMessage("You don't have a duck staked")
   let curLocation = stakingContract.getString(keyDuckLocation(duckAssetId)).valueOrElse(DEFAULTLOCATION).split("_")
   if (curLocation[locIdxType] != "M") then throw("Duck location type should be Manufactory, but is " + curLocation[locIdxType]) else
   let cont = curLocation[locIdxContinent]
   let currentPack = getBackpack(keyBackpackByDuck(duckAssetId))
   let matList = currentPack[bpIdxMat].split("_")
-  if (productIdx < 0 || productIdx >= productionMatrix.size()) then throw("Unknown product idx=" + productIdx.toString()) else
-  let recipe = productionMatrix[productIdx].split("_")
-  if (recipe.size() != RECIPESIZE) then throw("Fatal: unknown recipe: " + productionMatrix[productIdx]) else
-  let productContIdx = recipe[rIdxContinent].parseIntValue()
-  if (continents[productContIdx] != cont) then throw("This product is available in " + continents[productContIdx] + ", but you are in " + cont) else
+  let prodList = if (currentPack[bpIdxProd] == "") then [] else currentPack[bpIdxProd].split_4C("_")
 
-  let prodList = if (currentPack[bpIdxProd] == "") then [] else currentPack[bpIdxProd].split("_")
-  # Iterate backpack products, pad backpack with zeroes to match recipes size; add quantity of needed product
-  func filler(acc: (List[String], Int), ignoredItem: String) = {
-    let n = acc._2 # counter of products in backpack < productionMatrix.size()
-    let xs = if (n < prodList.size()) then prodList[n] else "0"
-    let x = xs.parseIntValue()
-    let amount = quantity * PRODUCTPKGSIZE
-    let y = if (n == productIdx) then toString(x + amount) else xs
-    (acc._1 :+ y, n + 1)
-  }
-  let bpProd = (FOLD<50>(productionMatrix, ([], 0), filler))._1 # list of updated products in backpack
-  # Iterate materials
-  func producer(acc: (List[String], Int), j: Int) = {
-    let needMat = recipe[j].parseIntValue() * MULT6 * quantity
-    let haveMat = matList[j].parseIntValue()
-    if (needMat > haveMat) then throw("You have " + haveMat.fixedPoint(8) + " of " + matTypes[j]
-      + ", but recipe requires " + needMat.fixedPoint(8) + " for quantity " + quantity.toString()) else
-    if (needMat > 0) then {
-      (acc._1 :+ toString(haveMat - needMat), # decrease backpack material by needMat
-      acc._2 + needMat)
-    } else
-      (acc._1 :+ matList[j], # keep old mat amount
-      acc._2)
-  }
-  let merged = FOLD<6>([0, 1, 2, 3, 4, 5], ([], 0), producer)
+  let (newMat, newProd, matSpent) = craftGoodsCommon(matList, prodList, cont, productIdx, quantity)
 
-  let newPack = makeString([currentPack[bpIdxLevel], currentPack[bpIdxRes], makeString(merged._1, "_"), makeString(bpProd, "_")], ":")
+  let newPack = makeString([currentPack[bpIdxLevel], currentPack[bpIdxRes], makeString(newMat, "_"), makeString_2C(newProd, "_")], ":")
   let result = stakingContract.invoke("updateBackpack", [duckAssetId, newPack], []).asString()
-  let statsResult = stakingContract.invoke("updateDuckStats", [duckAssetId, fraction(xpCraft, merged._2, MULT8)], []).asInt()
+  let statsResult = stakingContract.invoke("updateDuckStats", [duckAssetId, fraction(xpCraft, matSpent, MULT8)], []).asInt()
   
   ([], (result, prologResult, statsResult))
+}
+
+@Callable(i)
+func craftGoodsDuckDelivery(productIdx: Int, quantity: Int, manufactoryContinent: String) = {
+  strict prologResult = prolog()
+  let duckAssetId = stakingContract.getString(keyStakedDuckByOwner(i.caller.toString())).valueOrErrorMessage("You don't have a duck staked")
+  if (i.payments.size() != 1) then throw("exactly 1 payment must be attached") else
+  let pmt = i.payments[0]
+  let amt = pmt.amount
+  if (!pmt.assetId.isDefined() || pmt.assetId.value() != usdtAssetId) then throw("USDT payments only!") else
+  let currentPack = getBackpack(keyBackpackByDuck(duckAssetId))
+  let matList = currentPack[bpIdxMat].split("_")
+  let prodList = if (currentPack[bpIdxProd] == "") then [] else currentPack[bpIdxProd].split_4C("_")
+
+  let (newMat, newProd, matSpent) = craftGoodsCommon(matList, prodList, manufactoryContinent, productIdx, quantity)
+
+  let newPack = makeString([currentPack[bpIdxLevel], currentPack[bpIdxRes], makeString(newMat, "_"), makeString_2C(newProd, "_")], ":")
+  let backpackResult = stakingContract.invoke("updateBackpack", [duckAssetId, newPack], []).asString()
+  let statsResult = stakingContract.invoke("updateDuckStats", [duckAssetId, fraction(xpCraft, matSpent, MULT8)], []).asInt()
+
+  let feePart = fraction(quantity, MIN_USDT_FEE_DELIVERY, CRAFT_DELIVERY_COEFF)
+  let fee = max([feePart, MIN_USDT_FEE_DELIVERY])
+  let usdtSpentWithFee = CRAFT_USDT_COST + fee
+  if (usdtSpentWithFee > amt) then throw("Insufficient payment! Attached=" + amt.fixedPoint(6) + ", required=" + CRAFT_USDT_COST.fixedPoint(6) + "+" + fee.fixedPoint(6) + "(delivery fee)") else
+  let rest = if (amt - usdtSpentWithFee > 0) then [ScriptTransfer(i.caller, amt - usdtSpentWithFee, usdtAssetId)] else []
+  let fundTotal = getInteger(deliveryFundKey).valueOrElse(0)
+
+  (rest 
+  :+ IntegerEntry(deliveryFundKey, fundTotal + fee),
+    (backpackResult, prologResult, statsResult))
+}
+
+@Callable(i)
+func craftGoodsLandDelivery(productIdx: Int, quantity: Int, landAssetId: String, manufactoryContinent: String) = {
+  strict prologResult = prolog()
+  if (i.payments.size() != 1) then throw("exactly 1 payment must be attached") else
+  let pmt = i.payments[0]
+  let amt = pmt.amount
+  if (!pmt.assetId.isDefined() || pmt.assetId.value() != usdtAssetId) then throw("USDT payments only!") else
+  let user = i.caller
+  let addr = user.toString()
+  let asset = assetInfo(landAssetId.fromBase58String()).value()
+  if (!isDefined(stakingContract.getInteger(keyStakedTimeByAssetId(landAssetId)))) then throw("NFT " + asset.name + " is not staked") else
+  let owner = stakingContract.getString(keyLandAssetIdToOwner(landAssetId)).valueOrErrorMessage("NFT " + asset.name + " is orphaned")
+  if (owner != addr) then throw(LANDPREFIX + " is not yours") else
+
+  let wh = stakingContract.invoke("getWarehouseREADONLY", [landAssetId], []).asString()
+  let currentWh = split_4C(wh, ":")
+  let matList = currentWh[whIdxMat].split("_")
+  let prodList = if (currentWh[whIdxProd] == "") then [] else currentWh[whIdxProd].split_4C("_")
+
+  let (newMat, newProd, matSpent) = craftGoodsCommon(matList, prodList, manufactoryContinent, productIdx, quantity)
+
+  let whStr = makeString_2C([currentWh[whIdxLevels], currentWh[whIdxRes], makeString(newMat, "_"), makeString_2C(newProd, "_"), currentWh[whIdxLOFT]], ":")
+  let whSave = stakingContract.invoke("saveWarehouse", [whStr, landAssetId], []).asString()
+  let statsResult = stakingContract.invoke("updateAccStats", [addr, fraction(xpCraft, matSpent, MULT8)], []).asInt()
+
+  let feePart = fraction(quantity, MIN_USDT_FEE_DELIVERY, CRAFT_DELIVERY_COEFF)
+  let fee = max([feePart, MIN_USDT_FEE_DELIVERY])
+  let usdtSpentWithFee = CRAFT_USDT_COST + fee
+  if (usdtSpentWithFee > amt) then throw("Insufficient payment! Attached=" + amt.fixedPoint(6) + ", required=" + CRAFT_USDT_COST.fixedPoint(6) + "+" + fee.fixedPoint(6) + "(delivery fee)") else
+  let rest = if (amt - usdtSpentWithFee > 0) then [ScriptTransfer(i.caller, amt - usdtSpentWithFee, usdtAssetId)] else []
+  let fundTotal = getInteger(deliveryFundKey).valueOrElse(0)
+
+  (rest 
+  :+ IntegerEntry(deliveryFundKey, fundTotal + fee),
+    (whSave, prologResult, statsResult))
 }
 
 # newOrderStr contains all resources, materials and goods in the form:
@@ -486,7 +915,7 @@ func setWarehouseOrder(newOrderStr: String, landAssetId: String) = {
   let whFree = whTotal - whOccupied - whLocked
   if (whFree < 0) then throw("Attempt to reserve " + buyVolSaldo.toString() + " space for buy orders, and " + 
     sellVolSaldo.toString() + " space for sell orders (and occupied=" + whOccupied.toString() + "), leads to negative free space") else
-  let whStr = makeString_2C([currentWh[whIdxLevels], makeString(z._1, "_"), makeString(z._2, "_"), makeString(z._3, "_"), toString(whLocked)], ":")
+  let whStr = makeString_2C([currentWh[whIdxLevels], makeString(z._1, "_"), makeString(z._2, "_"), makeString_2C(z._3, "_"), toString(whLocked)], ":")
   let whSave = stakingContract.invoke("saveWarehouse", [whStr, landAssetId], []).asString()
   let usdSaldo = z._6 # positive means amount need to lock (bid) and cover by payment attached
   let actions = if (usdSaldo > 0) then {
@@ -514,8 +943,8 @@ func setWarehouseOrder(newOrderStr: String, landAssetId: String) = {
 # payment attached should cover all buy positions including 1% fee
 # TODO: check min. order value
 @Callable(i)
-func acceptWarehouseOrder(bpOrderStr: String, landAssetId: String, duckAssetId: String) = {
-  let prologResult = prolog()
+func acceptWarehouseOrder(bpOrderStr: String, shopLandAssetId: String, duckAssetId: String) = {
+  strict prologResult = prolog()
   let caller = i.originCaller
   let callerAddr = caller.toString()
   let stakedDuckAssetId = stakingContract.getString(keyStakedDuckByOwner(callerAddr)).valueOrErrorMessage("You don't have a duck staked")
@@ -523,102 +952,95 @@ func acceptWarehouseOrder(bpOrderStr: String, landAssetId: String, duckAssetId: 
   let loc = curLocation.value().split("_")
   if (loc[locIdxType] != "L") then throw("Duck location type is " + loc[locIdxType] + ", but should be L") else
   if (stakedDuckAssetId != duckAssetId) then throw("Your staked duck is " + stakedDuckAssetId + ", but passed " + duckAssetId) else
-
-  let landAsset = assetInfo(landAssetId.fromBase58String()).value()
-  if (!isDefined(stakingContract.getInteger(keyStakedTimeByAssetId(landAssetId)))) then throw("NFT " + landAsset.name + " is not staked") else
-  let landOwner = stakingContract.getString(keyLandAssetIdToOwner(landAssetId)).valueOrErrorMessage("NFT " + landAsset.name + " is orphaned")
-  if (landOwner == callerAddr) then throw("You cannot trade with yourself") else
-  let bpOrderParts = split_4C(bpOrderStr, ":")
-  if (bpOrderParts.size() != 3) then throw("bpOrderStr should contain exactly 2 ':' separators") else
-  let bpOrdRes = bpOrderParts[0].split("_")
-  let bpOrdMat = bpOrderParts[1].split("_")
-  let bpOrdProd = if (bpOrderParts[2] == "") then [] else bpOrderParts[2].split("_")
-  if (bpOrdRes.size() != NUMRES) then throw("All 6 resources should be passed") else
-  if (bpOrdMat.size() != NUMRES) then throw("All 6 materials should be passed") else
-
-  let wh = stakingContract.invoke("getWarehouseREADONLY", [landAssetId], []).asString()
-  let currentWh = split_4C(wh, ":")
-  let currWhRes = currentWh[whIdxRes].split("_") # resources already in warehouse
-  let currWhMat = currentWh[whIdxMat].split("_") # materials already in warehouse
-  let currWhProd = if (currentWh[whIdxProd] == "") then [] else currentWh[whIdxProd].split("_") # products already in warehouse
-
-  let currWhLockedVol = currentWh[whIdxLOFT].split("_")[volLocked].parseIntValue()
-
   let bpKey = keyBackpackByDuck(duckAssetId)
   let currentPack = getBackpack(bpKey)
   let bpResList = currentPack[bpIdxRes].split("_")
   let bpMatList = currentPack[bpIdxMat].split("_")
-  let bpProdList = if (currentPack[bpIdxProd] == "") then [] else currentPack[bpIdxProd].split("_")
+  let bpProdList = if (currentPack[bpIdxProd] == "") then [] else currentPack[bpIdxProd].split_4C("_")
 
-  # whOrd is "current order for landAssetId's warehouse"
-  let ordKey = keyOrderByLand(landAssetId)
-  let whOrd = getOrder(ordKey)
-  let whOrdRes = whOrd[ordIdxRes].split("_") # res@price currently in order
-  let whOrdMat = whOrd[ordIdxMat].split("_") # mat@price currently in order
-  let whOrdProd = if (whOrd[ordIdxProd] == "") then [] else whOrd[ordIdxProd].split("_") # prod@price currently in order
+  let (shopAction, newUserRes, newUserMat, newUserProd, usdWh2BpSaldo, usdBp2WhSaldo, xpAmount, shopLandOwner, shopWhSave, accStatsResult) = 
+    acceptShopOrderCommon(shopLandAssetId, callerAddr, bpOrderStr, bpResList, bpMatList, bpProdList)
 
-  # acc: (wh{Res|Mat|Prod}List, whOrder{Res|Mat|Prod}List, bp{Res|Mat|Prod}List, whVol2unlock, usdWh2Bp, usdBp2Wh, iterIndex,
-  #       initialBp{Res|Mat|Prod}List, initialWh{Res|Mat|Prod}List, initialWhOrder{Res|Mat|Prod}List, itemNames, isProduct, totalResMatProd)
-  let r = FOLD<6>(bpOrdRes, ([], [], [], 0, 0, 0, 0, bpResList, currWhRes, whOrdRes, resTypes, false, 0), acceptCommon)
-  let m = FOLD<6>(bpOrdMat, ([], [], [], r._4, r._5, r._6, 0, bpMatList, currWhMat, whOrdMat, matTypes, false, r._13), acceptCommon)
-  let p = if (bpOrdProd.size() != 0) then 
-    (FOLD<50>(bpOrdProd, ([], [], [], m._4, m._5, m._6, 0, bpProdList, currWhProd, whOrdProd, prodTypes, true, m._13), acceptCommon)) 
-    else (currWhProd, whOrdProd, bpProdList, m._4, m._5, m._6, 0, bpProdList, currWhProd, whOrdProd, prodTypes, true, m._13)
+  let actions1 = shopAction # save new WH order 
+    :: shop2userActions(usdWh2BpSaldo, callerAddr, 0) # usd unlocked from shop order -> transfer to user
+  let actions2 = user2shopActions(usdBp2WhSaldo, i.payments, shopLandOwner, 0) # usd from user -> transfer to shop
 
-  let volSaldo = p._4 # always positive or 0, means locked WH volume to free
-  let newLockedVol = if (currWhLockedVol - volSaldo < 0) then 0 else currWhLockedVol - volSaldo
-  let whStr = makeString_2C([currentWh[whIdxLevels], makeString(r._1, "_"), makeString(m._1, "_"), makeString(p._1, "_"), newLockedVol.toString()], ":")
-  let newWhOrdStr = makeString_2C([makeString(r._2, "_"), makeString(m._2, "_"), makeString(p._2, "_")], ":")
-  let newBpStr = makeString_2C([currentPack[bpIdxLevel], makeString(r._3, "_"), makeString(m._3, "_"), makeString(p._3, "_")], ":")
-  let whSave = stakingContract.invoke("saveWarehouse", [whStr, landAssetId], []).asString()
+  let newBpStr = makeString_2C([currentPack[bpIdxLevel], makeString(newUserRes, "_"), makeString(newUserMat, "_"), makeString_2C(newUserProd, "_")], ":")
   let bpSave = stakingContract.invoke("updateBackpack", [duckAssetId, newBpStr], []).asString()
-  let duckStatsResult = stakingContract.invoke("updateDuckStats", [duckAssetId, fraction(xpShop, p._13, MULT8)], []).asInt()
-  let accStatsResult = stakingContract.invoke("updateAccStats", [landOwner, fraction(xpShop, p._13, MULT8)], []).asInt()
-  let actions = [StringEntry(ordKey, newWhOrdStr)] # save new WH order
-  let usdWh2BpSaldo = p._5 # >=0, part of wh bids (locked usd)
-  let actions1 = if (usdWh2BpSaldo > 0) then {
-    let usdWh2BpFee = fraction(p._5, AUCTIONFEE, MULT6) # >=0, fee part of wh bids (locked usd)
-    let refByKey = keyAddressRefBy(callerAddr)
-    let refBy = stakingContract.getString(refByKey)
-    if (refBy.isDefined()) then # duck owner's oldie exists
-      actions
-      :+ ScriptTransfer(caller, p._5 - 3 * usdWh2BpFee, usdtAssetId) # duck owner (seller) pays 3% fee
-      :+ ScriptTransfer(restContract, usdWh2BpFee, usdtAssetId) # 1% goes to rest contract for activities
-      :+ ScriptTransfer(refBy.value().addressFromStringValue(), usdWh2BpFee, usdtAssetId) # 1% goes to oldie of duck owner
-    else
-      actions
-      :+ ScriptTransfer(caller, p._5 - 3 * usdWh2BpFee, usdtAssetId) # duck owner (seller) pays 3% fee
-      :+ ScriptTransfer(restContract, usdWh2BpFee, usdtAssetId) # 1% goes to rest contract for activities
-  } else { # usdWh2BpSaldo == 0
-    actions
-  }
-  let usdBp2WhSaldo = p._6 # >=0, sum of bp bids (locked usd)
-  let actions2 = if (usdBp2WhSaldo > 0) then {
-    if (i.payments.size() != 1) then throw("exactly 1 payment must be attached") else
-    let pmt = i.payments[0]
-    let amt = pmt.amount
-    let pmtAssetId = pmt.assetId.valueOrErrorMessage("WAVES can't be used as payment")
-    if (pmtAssetId != usdtAssetId) then throw("USDT payments only!") else
-    if (amt != usdBp2WhSaldo) then throw("Payment needed is " + usdBp2WhSaldo.toString()) else
-    if (amt < MINSHOPPAYMENT) then throw("Payment should be at least " + MINSHOPPAYMENT.toString()) else
+  let duckStatsResult = stakingContract.invoke("updateDuckStats", [duckAssetId, fraction(xpShop, xpAmount, MULT8)], []).asInt()
 
-    let usdBp2WhFee = fraction(p._6, AUCTIONFEE, MULT6) # >=0, fee of sum of bp bids (locked usd)
-    let refByKey = keyAddressRefBy(landOwner)
-    let refBy = stakingContract.getString(refByKey)
-    if (refBy.isDefined()) then # land owner's oldie exists
-      actions1
-      :+ ScriptTransfer(landOwner.addressFromStringValue(), p._6 - 3 * usdBp2WhFee, usdtAssetId) # land owner (seller) pays 3% fee
-      :+ ScriptTransfer(restContract, usdBp2WhFee, usdtAssetId) # 1% goes to rest contract for activities
-      :+ ScriptTransfer(refBy.value().addressFromStringValue(), usdBp2WhFee, usdtAssetId) # 1% goes to oldie of land owner
-    else
-      actions1
-      :+ ScriptTransfer(landOwner.addressFromStringValue(), p._6 - 3 * usdBp2WhFee, usdtAssetId) # land owner (seller) pays 3% fee
-      :+ ScriptTransfer(restContract, usdBp2WhFee, usdtAssetId) # 1% goes to rest contract for activities
-  } else { # usdBp2WhSaldo == 0
-    if (i.payments.size() != 0) then throw("No payments needed") else
-    actions1
-  }
-  (actions2, (prologResult, whSave, bpSave, duckStatsResult, accStatsResult))
+  (actions1 ++ actions2, (prologResult, shopWhSave, bpSave, duckStatsResult, accStatsResult))
+}
+
+@Callable(i)
+func acceptShopOrderDuckDelivery(orderStr: String, shopLandAssetId: String) = {
+  strict prologResult = prolog()
+  let caller = i.originCaller
+  let callerAddr = caller.toString()
+  let duckAssetId = stakingContract.getString(keyStakedDuckByOwner(callerAddr)).valueOrErrorMessage("You don't have a duck staked")
+  let bpKey = keyBackpackByDuck(duckAssetId)
+  let currentPack = getBackpack(bpKey)
+  let bpResList = currentPack[bpIdxRes].split("_")
+  let bpMatList = currentPack[bpIdxMat].split("_")
+  let bpProdList = if (currentPack[bpIdxProd] == "") then [] else currentPack[bpIdxProd].split_4C("_")
+
+  let (shopAction, newUserRes, newUserMat, newUserProd, usdWh2BpSaldo, usdBp2WhSaldo, xpAmount, shopLandOwner, shopWhSave, accStatsResult) = 
+    acceptShopOrderCommon(shopLandAssetId, callerAddr, orderStr, bpResList, bpMatList, bpProdList)
+
+  let deliveryFeePart = fraction(usdBp2WhSaldo + usdWh2BpSaldo, DELIVERY_FEE, MULT6)
+  let deliveryFee = max([deliveryFeePart, MIN_USDT_FEE_DELIVERY])
+  let spentFee = fraction(deliveryFee, usdBp2WhSaldo, usdBp2WhSaldo + usdWh2BpSaldo)
+  let receivedFee = deliveryFee - spentFee
+  let fundTotal = getInteger(deliveryFundKey).valueOrElse(0)
+
+  let actions1 = shopAction # save new WH order 
+    :: shop2userActions(usdWh2BpSaldo, callerAddr, receivedFee) # usd unlocked from shop order -> transfer to user
+  let actions2 = user2shopActions(usdBp2WhSaldo, i.payments, shopLandOwner, spentFee) # usd from user -> transfer to shop
+
+  let newBpStr = makeString_2C([currentPack[bpIdxLevel], makeString(newUserRes, "_"), makeString(newUserMat, "_"), makeString_2C(newUserProd, "_")], ":")
+  let bpSave = stakingContract.invoke("updateBackpack", [duckAssetId, newBpStr], []).asString()
+  let duckStatsResult = stakingContract.invoke("updateDuckStats", [duckAssetId, fraction(xpShop, xpAmount, MULT8)], []).asInt()
+
+  (actions1 ++ actions2 
+  :+ IntegerEntry(deliveryFundKey, fundTotal + deliveryFee), (prologResult, shopWhSave, bpSave, duckStatsResult, accStatsResult))
+}
+
+@Callable(i)
+func acceptShopOrderLandDelivery(orderStr: String, shopLandAssetId: String, myLandAssetId: String) = {
+  strict prologResult = prolog()
+  let caller = i.originCaller
+  let callerAddr = caller.toString()
+
+  let asset = assetInfo(myLandAssetId.fromBase58String()).value()
+  if (!isDefined(stakingContract.getInteger(keyStakedTimeByAssetId(myLandAssetId)))) then throw("NFT " + asset.name + " is not staked") else
+  let owner = stakingContract.getString(keyLandAssetIdToOwner(myLandAssetId)).valueOrErrorMessage("NFT " + asset.name + " is orphaned")
+  if (owner != callerAddr) then throw(LANDPREFIX + " is not yours") else
+
+  let wh = stakingContract.invoke("getWarehouseREADONLY", [myLandAssetId], []).asString()
+  let currentWh = split_4C(wh, ":")
+  let resList = currentWh[whIdxRes].split("_")
+  let matList = currentWh[whIdxMat].split("_")
+  let prodList = if (currentWh[whIdxProd] == "") then [] else currentWh[whIdxProd].split_4C("_")
+
+  let (shopAction, newUserRes, newUserMat, newUserProd, usdWh2BpSaldo, usdBp2WhSaldo, xpAmount, shopLandOwner, shopWhSave, accStatsResult) = 
+    acceptShopOrderCommon(shopLandAssetId, callerAddr, orderStr, resList, matList, prodList)
+
+  let deliveryFeePart = fraction(usdBp2WhSaldo + usdWh2BpSaldo, DELIVERY_FEE, MULT6)
+  let deliveryFee = max([deliveryFeePart, MIN_USDT_FEE_DELIVERY])
+  let spentFee = fraction(deliveryFee, usdBp2WhSaldo, usdBp2WhSaldo + usdWh2BpSaldo)
+  let receivedFee = deliveryFee - spentFee
+  let fundTotal = getInteger(deliveryFundKey).valueOrElse(0)
+
+  let actions1 = shopAction # save new WH order 
+    :: shop2userActions(usdWh2BpSaldo, callerAddr, receivedFee) # usd unlocked from shop order -> transfer to user
+  let actions2 = user2shopActions(usdBp2WhSaldo, i.payments, shopLandOwner, spentFee) # usd from user -> transfer to shop
+
+  let whStr = makeString_2C([currentWh[whIdxLevels], makeString(newUserRes, "_"), makeString(newUserMat, "_"), makeString(newUserProd, "_"), currentWh[whIdxLOFT]], ":")
+  let whSave = stakingContract.invoke("saveWarehouse", [whStr, myLandAssetId], []).asString()
+  let statsResult = stakingContract.invoke("updateAccStats", [callerAddr, fraction(xpShop, xpAmount, MULT8)], []).asInt()
+
+  (actions1 ++ actions2 
+  :+ IntegerEntry(deliveryFundKey, fundTotal + deliveryFee), (prologResult, shopWhSave, whSave, statsResult, accStatsResult))
 }
 
 # factory material price = RESOURCEPRICEMIN * [2..3] => we use RESOURCEPRICEMIN * ESBUYCOEF for buy at ES 
@@ -626,16 +1048,16 @@ func acceptWarehouseOrder(bpOrderStr: String, landAssetId: String, duckAssetId: 
 # emergency service: max ESMAXPACKAGES of each product (shared between all continents)
 @Callable(i)
 func sellProductsToES(amounts: List[Int]) = {
-  let prologResult = prolog()
+  strict prologResult = prolog()
   if (i.payments.size() != 0) then throw("No payments needed") else
   let duckAssetId = stakingContract.getString(keyStakedDuckByOwner(i.caller.toString())).valueOrErrorMessage("You don't have a duck staked")
   let curLocation = stakingContract.getString(keyDuckLocation(duckAssetId)).valueOrElse(DEFAULTLOCATION).split("_")
   if (curLocation[locIdxType] != "A") then throw("Duck location type should be Airport, but is " + curLocation[locIdxType]) else
   let currentPack = getBackpack(keyBackpackByDuck(duckAssetId))
-  let prodList = if (currentPack[bpIdxProd] == "") then [] else currentPack[bpIdxProd].split("_")
+  let prodList = if (currentPack[bpIdxProd] == "") then [] else currentPack[bpIdxProd].split_4C("_")
   let esKey = keyEsWarehouse()
   let existStr = getString(esKey)
-  let existAmounts = if (existStr.isDefined()) then existStr.value().split("_") else []
+  let existAmounts = if (existStr.isDefined()) then existStr.value().split_4C("_") else []
   # updates warehouse and backpack for every product
   # acc: (prodIndex, usdt, newBpProdList, newWhProdList)
   func moveProd(acc: (Int, Int, List[String], List[String], Int), recipeStr: String) = {
@@ -648,20 +1070,20 @@ func sellProductsToES(amounts: List[Int]) = {
     let existAmount = if (size(existAmounts) > j) then existAmounts[j].parseIntValue() else 0
     let canBuy = maxAmount - existAmount
     if (quantity > canBuy) then throw("Warehouse can buy only " + canBuy.toString() + " of " + prodTypes[j]) else
-    let totalMat = getRecipeMaterials(recipe)
-    let unitPrice = fraction(totalMat * ESBUYCOEF, RESOURCEPRICEMIN, 10 * PRODUCTPKGSIZE)
+    let totalMat = getRecipeMaterials(recipe) # 8 decimals
+    let unitPrice = fraction(totalMat * ESBUYCOEF, RESOURCEPRICEMIN, MULT8 * PRODUCTPKGSIZE)
     let bpProdAmount = if (prodList.size() > j) then prodList[j].parseIntValue() else 0
     if (bpProdAmount < quantity) then throw("You have only " + bpProdAmount.toString() + " of " + prodTypes[j]) else
 
     (j + 1, acc._2 + unitPrice * quantity, acc._3 :+ toString(bpProdAmount - quantity), acc._4 :+ toString(existAmount + quantity), acc._5 + totalMat * quantity)
   }
   let merged = (FOLD<50>(productionMatrix, (0, 0, [], [], 0), moveProd))
-  let newBpStr = makeString_2C([currentPack[bpIdxLevel], currentPack[bpIdxRes], currentPack[bpIdxMat], makeString(merged._3, "_")], ":")
+  let newBpStr = makeString_2C([currentPack[bpIdxLevel], currentPack[bpIdxRes], currentPack[bpIdxMat], makeString_2C(merged._3, "_")], ":")
   let bpSave = stakingContract.invoke("updateBackpack", [duckAssetId, newBpStr], []).asString()
   let statsResult = stakingContract.invoke("updateDuckStats", [duckAssetId, fraction(xpSellToEs, merged._5, MULT8 * 10)], []).asInt()
 
   ([
-    StringEntry(esKey, makeString(merged._4, "_")),
+    StringEntry(esKey, makeString_2C(merged._4, "_")),
     ScriptTransfer(i.caller, merged._2, usdtAssetId)
   ], (bpSave, prologResult, statsResult))
 }
@@ -671,4 +1093,27 @@ func sellProductsToES(amounts: List[Int]) = {
 func updateEsStorage(newStorage: String) = {
   if (i.caller != stakingContract) then throw("Permission denied") else
   ([StringEntry(keyEsWarehouse(), newStorage)], newStorage)
+}
+
+# callback for staking contract
+@Callable(i)
+func sendDeliveryReward(addr: String) = {
+  if (i.caller != stakingContract) then throw("Permission denied") else
+  let fundTotal = getInteger(deliveryFundKey).valueOrElse(0)
+  if (fundTotal < MIN_USDT_FEE_DELIVERY) then throw("Delivery fund is empty") else
+  let acresAmount = 2 * MIN_USDT_FEE_DELIVERY * USDT2ACRES_MULTIPLIER
+  let acresResult = acresContract.invoke("sendAcres", [addr, acresAmount], [])
+  ([IntegerEntry(deliveryFundKey, fundTotal - MIN_USDT_FEE_DELIVERY)], acresResult)
+}
+
+# for admin to top up delivery fund
+@Callable(i)
+func replenishDeliveryFund() = {
+  if (i.payments.size() != 1) then throw("exactly 1 payment must be attached") else
+  let pmt = i.payments[0]
+  if (!pmt.assetId.isDefined() || pmt.assetId.value() != usdtAssetId) then throw("USDT payments only!") else
+  let addedUsdt = pmt.amount
+  if (addedUsdt <= 0) then throw("addedUsdt should be positive") else
+  let fundNew = getInteger(deliveryFundKey).valueOrElse(0) + addedUsdt
+  ([IntegerEntry(deliveryFundKey, fundNew)], fundNew)
 }
