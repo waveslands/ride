@@ -15,6 +15,7 @@ let adminsList = [
 func walletInternal(userAddressOpt: String) = {
   let addr = addressFromString(userAddressOpt)
   let balance = if (addr.isDefined()) then addr.value().wavesBalance() else BalanceDetails(0, 0, 0, 0)
+  let usdtBalance = if (addr.isDefined()) then assetBalance(addr.value(), usdtAssetId) else 0
   let wlgoldBalance = if (addr.isDefined()) then assetBalance(addr.value(), wlgAssetId) else 0
   let customName = acres2Contract.getString(keyAddressToCustomName(userAddressOpt)).valueOrElse(userAddressOpt)
   let refByKey = keyAddressRefBy(userAddressOpt)
@@ -23,18 +24,21 @@ func walletInternal(userAddressOpt: String) = {
   let lastTxId = acres2Contract.getString(keyLastTxIdByUser(userAddressOpt)).valueOrElse("")
   let acresBalance = if (addr.isDefined()) then assetBalance(addr.value(), acresAssetId) else 0
   let stakedAcres = acres2Contract.getInteger(keyAcresStakedAmtByUser(userAddressOpt)).valueOrElse(0)
-  let lvl = getLevelByAcres(acresBalance)
+  let lvl = getLevelByAcres(stakedAcres) # 1..10
   let fp = getFarmingPowers(userAddressOpt, acres2Contract)
+  let acresToNextLvl = if (lvl >= levelAcres.size()) then 0 else (levelAcres[lvl] + 1 - stakedAcres)
   [
     "%s%s__customName__" + customName,
     "%s%s__referredBy__" + refBy.valueOrElse(""),
     "%s%s__referrals__" + refs,
     "%s%s__lastTxId__" + lastTxId,
     "%s%d__wavesBalance__" + balance.available.toString(),
+    "%s%d__usdtBalance__" + usdtBalance.toString(),
     "%s%d__wlgoldBalance__" + wlgoldBalance.toString(),
     "%s%d__acresBalance__" + acresBalance.toString(),
     "%s%d__stakedAcres__" + stakedAcres.toString(),
     "%s%d__currentLvl__" + lvl.toString(),
+    "%s%d__acresToNextLvl__" + acresToNextLvl.toString(),
     "%s%d__userFarmingPower__" + fp[idxUserFP].toString(),
     "%s%d__totalFarmingPower__" + fp[idxTotalFP].toString()
   ]

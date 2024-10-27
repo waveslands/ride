@@ -150,8 +150,7 @@ func buyWlg(minAmount: Int) = {
   if (usdtAmt < MINSHOPPAYMENT) then throw("You can trade min " + MINSHOPPAYMENT.fixedPoint(6) + " USDT") else
   let curStats = getWlgStats2("", [rest2Contract, acres2Contract, wlgContract, puzzlePoolContract, investFundContract], usdtAssetId, usdtAmt)
   let curWlgAmount = curStats[ixWlgAmount] # current totalWlgSupply
-  let fundsUsd = curStats[ixWlgFunds] # TVL = wlgUsd + investFundTotal
-  let wlgPrice = fraction(fundsUsd, MULT8, curWlgAmount)
+  let wlgPrice = curStats[ixWlgPrice]
   let buyPrice = fraction(wlgPrice, 6, 5) # +20%
   let wlgAmount = fraction(usdtAmt, MULT8, buyPrice)
   let maxWlg = getSwapLimitWlg(addr)
@@ -164,6 +163,18 @@ func buyWlg(minAmount: Int) = {
     ScriptTransfer(getString(profitAddrKey).value().addressFromStringValue(), profitAmount, usdtAssetId),
     ScriptTransfer(caller, wlgAmount, wlgAssetId)
   ], prologResult)
+}
+
+@Callable(i)
+func buyWlgREADONLY(address: String, usdtAmt: Int) = {
+  let curStats = getWlgStats2("", [rest2Contract, acres2Contract, wlgContract, puzzlePoolContract, investFundContract], usdtAssetId, usdtAmt)
+  let curWlgAmount = curStats[ixWlgAmount] # current totalWlgSupply
+  let wlgPrice = curStats[ixWlgPrice]
+  let buyPrice = fraction(wlgPrice, 6, 5) # +20%
+  let wlgAmount = fraction(usdtAmt, MULT8, buyPrice)
+  let maxWlg = getSwapLimitWlg(address)
+  let profitAmount = usdtAmt / 6
+  ([], [wlgAmount, MINSHOPPAYMENT, maxWlg, profitAmount])
 }
 
 # need to burn WLGOLD received to keep price the same
@@ -192,6 +203,18 @@ func sellWlg(minAmount: Int) = {
     ScriptTransfer(getString(profitAddrKey).value().addressFromStringValue(), profitAmount, usdtAssetId),
     ScriptTransfer(caller, usdtAmt, usdtAssetId)
   ], prologResult)
+}
+
+@Callable(i)
+func sellWlgREADONLY(address: String, wlgAmt: Int) = {
+  let maxWlg = getSwapLimitWlg(address)
+  let curStats = getWlgStats2("", [rest2Contract, acres2Contract, wlgContract, puzzlePoolContract, investFundContract], usdtAssetId, 0)
+  let curWlgAmount = curStats[ixWlgAmount]
+  let sellPrice = curStats[ixWlgPrice] / 2 # -50%
+  let usdtAmt = fraction(wlgAmt, sellPrice, MULT8) # 50% goes to user
+  let minWlg = fraction(MINSHOPPAYMENT, MULT8, sellPrice)
+  let profitAmount = usdtAmt / 5 # 10% goes to team
+  ([], [usdtAmt, minWlg, maxWlg, profitAmount])
 }
 
 @Callable(i)

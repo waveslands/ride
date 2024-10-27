@@ -46,6 +46,7 @@ let dapp2Wlg        = 2
 let dapp2Puzzle     = 3
 let dapp2InvestFund = 4
 
+# 0 -> level 0
 # 0.00000001 .. 10 - level 1
 # 10.00000001 .. 20 - level 2
 # 20.00000001 .. 40 - level 3
@@ -55,14 +56,13 @@ let dapp2InvestFund = 4
 # 250.00000001 .. 400 - level 7
 # 400.00000001 .. 700 - level 8
 # 700.00000001 .. 1000 - level 9
-# >1000 - level 10
-let levels = [10, 20, 40, 80, 150, 250, 400, 700, 1000]
+# >=1000.00000001 - level 10
+let levelAcres = [0, 10, 20, 40, 80, 150, 250, 400, 700, 1000]
 
 func getLevelByAcres(acres: Int) = {
-  let acr = acres / M8_
-  func checker(acc: Int, item: Int) = if (acr < item) then acc else acc + 1
-  let idx = FOLD<10>(levels, 0, checker)
-  idx + 1
+  let acr = (acres + 9999_9999) / M8_
+  func checker(acc: Int, item: Int) = if (acr <= item) then acc else acc + 1
+  FOLD<10>(levelAcres, 0, checker)
 }
 
 func getFarmingPowerByAcres(acres: Int) = {
