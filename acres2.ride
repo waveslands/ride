@@ -8,12 +8,15 @@ func prolog(i: Invocation) = {
   [StringEntry(keyLastTxIdByUser(i.originCaller.toString()), i.transactionId.toBase58String())]
 }
 
-func stakeAcresInternal(amt: Int, address: String) = {
+# pass negative amount to unstake
+func stakeUnstakeAcresInternal(amt: Int, address: String) = {
   strict wlgResult = wlgContract.invoke("onStakeUnstakeLand", [address], [])
   let now = lastBlock.timestamp
   let timeKey = keyAcresStakedTimeByUser(address)
   let amountKey = keyAcresStakedAmtByUser(address)
-  let newAcresAmount = getInteger(amountKey).valueOrElse(0) + amt
+  let oldAcresAmount = getInteger(amountKey).valueOrElse(0)
+  if (amt < 0 && (oldAcresAmount + amt) < 0) then throw("You have only " + oldAcresAmount.fixedPoint(8) + " ACRES staked, tried to unstake " + fixedPoint(-amt, 8)) else
+  let newAcresAmount = oldAcresAmount + amt
   let oldTotal = getInteger(acresStakdTotalKey).valueOrElse(0)
   let userFpKey = keyFarmingPowerByUser(address)
   let oldFp = getInteger(userFpKey).valueOrElse(0)
@@ -39,16 +42,31 @@ func getWlgPrice(usdtBalanceCorrection: Int) = {
   fraction(totalFundsUsd, MULT8, issuedAmount)
 }
 
-func keyLastAcresSellTimeByUser(addr: String) = "lastAcresSellTimeUser_" + addr
+let keyLastAcresSellTime = "lastAcresSellTime"
+let keyLastLimitLeft = "lastLimitLeft" # in USDT
+let keyLastSavedTVL = "lastSavedTVL" # in USDT
 
-func getSwapLimitAcres(addr: String) = {
-  let lastTime = getInteger(keyLastAcresSellTimeByUser(addr)).valueOrElse(0)
-  let now = lastBlock.timestamp
-  if (now - lastTime < arbitrageDelay) then throw("Arbitrages are possible once a " + toString(arbitrageDelay / 60000) + "min") else
+
+# Total daily limit is 1% of TVL
+# Sell is done, limit decreased, cooldown starts linearly: limitLeft(t) = limitLeft(lastT) + k * (t-lastT)
+# Assume user has used whole 1% of TVL at moment lastT
+# k = 0.01 * lastSavedTVL / DAY_MILLIS
+# limitLeft(t) = limitLeft(lastT) + 0.01 * lastSavedTVL * (t-lastT) / DAY_MILLIS
+func getSwapLimitAcres() = {
   let wlgUsd = wlgContract.assetBalance(usdtAssetId)
   let acres2Usd = this.assetBalance(usdtAssetId)
   let investFundTotal = investFundContract.assetBalance(usdtAssetId) + investFundContract.getInteger(zbIssuedAmtKey).valueOrElse(0)
-  (acres2Usd + wlgUsd + investFundTotal) / ACRES_LIMIT_DIVISOR
+  let newTVL = acres2Usd + wlgUsd + investFundTotal
+  let defaultLimit = newTVL / ONE_PERCENT_DIVISOR
+  let lastLimitLeft = getInteger(keyLastLimitLeft).valueOrElse(defaultLimit)
+  let lastTVL = getInteger(keyLastSavedTVL).valueOrElse(newTVL)
+  let lastTime = getInteger(keyLastAcresSellTime).valueOrElse(0)
+  let now = lastBlock.timestamp
+  let currentLimit = lastLimitLeft + fraction(lastTVL, lastTime - now, DAY_MILLIS * ONE_PERCENT_DIVISOR)
+  let limitLeftUsdt = min([currentLimit, defaultLimit])
+  ([IntegerEntry(keyLastLimitLeft, limitLeftUsdt),
+    IntegerEntry(keyLastSavedTVL, lastTVL),
+    IntegerEntry(keyLastAcresSellTime, now)], limitLeftUsdt * USDT2ACRES_MULTIPLIER )
 }
 
 # callback for secondary contracts
@@ -71,12 +89,6 @@ func constructorV1(rest2Addr: String, oldAcrContract: String) = {
 }
 
 @Callable(i)
-func saveInteger(key: String, amount: Int) = {
-  if (i.caller != this) then throw("saveInteger is not public method") else
-  [IntegerEntry(key, amount)]
-}
-
-@Callable(i)
 func setBlocked(isBlocked: Boolean) = {
   if (i.caller != this) then throw("permission denied") else
   [BooleanEntry(keyBlocked(), isBlocked)]
@@ -89,25 +101,9 @@ func unstakeAcres(amount: Int) = {
   let address = i.caller.toString()
   if (i.payments.size() != 0) then throw("No payments required") else
 
-  let timeKey = keyAcresStakedTimeByUser(address)
-  let amountKey = keyAcresStakedAmtByUser(address)
-  let oldAcresAmount = getInteger(amountKey).valueOrElse(0)
-  if (amount > oldAcresAmount) then throw("You have only " + oldAcresAmount.fixedPoint(8) + " ACRES staked, tried to unstake " + amount.fixedPoint(8)) else
-  let oldTotal = getInteger(acresStakdTotalKey).valueOrElse(0)
-  let wlgResult = wlgContract.invoke("onStakeUnstakeLand", [address], [])
+  let (actions, wlgClaimedAmount) = stakeUnstakeAcresInternal(-amount, address)
 
-  let newAcresAmount = oldAcresAmount - amount
-  let userFpKey = keyFarmingPowerByUser(address)
-  let oldFp = getInteger(userFpKey).valueOrElse(0)
-  let newFp = getFarmingPowerByAcres(newAcresAmount)
-  let oldTotalFp = getInteger(totalFarmingPowerKey).valueOrElse(0)
-
-  ([IntegerEntry(timeKey, lastBlock.timestamp),
-    IntegerEntry(amountKey, oldAcresAmount - amount),
-    IntegerEntry(acresStakdTotalKey, oldTotal - amount),
-    IntegerEntry(userFpKey, newFp),
-    IntegerEntry(totalFarmingPowerKey, oldTotalFp - oldFp + newFp),
-    ScriptTransfer(i.caller, amount, acresAssetId)] ++ prologActions, wlgResult)
+  (actions :+ ScriptTransfer(i.caller, amount, acresAssetId) ++ prologActions, wlgClaimedAmount)
 }
 
 @Callable(i)
@@ -118,7 +114,7 @@ func stakeAcres() = {
   let pmt = i.payments[0]
   let amt = pmt.amount
   if (!pmt.assetId.isDefined() || pmt.assetId.value() != acresAssetId) then throw("ACRES payments only!") else
-  let (actions, wlgClaimedAmount) = stakeAcresInternal(amt, address)
+  let (actions, wlgClaimedAmount) = stakeUnstakeAcresInternal(amt, address)
   (actions ++ prologActions, wlgClaimedAmount)
 }
 
@@ -159,17 +155,17 @@ func sellAcres() = {
   if (!pmt.assetId.isDefined() || pmt.assetId.value() != acresAssetId) then throw("ACRES payments only!") else
   if (acresAmount < MULT7) then throw("Min payment should be " + MULT7.fixedPoint(8) + " ACRES") else
   let addr = i.caller.toString()
-  let maxAcres = getSwapLimitAcres(addr)
+  let (limitActions, maxAcres) = getSwapLimitAcres()
   if (acresAmount > maxAcres) then throw("You can sell max " + maxAcres.fixedPoint(8) + " ACRES") else
   let usdtAmount = acresAmount / USDT2ACRES_MULTIPLIER / 2
-  ([IntegerEntry(keyLastAcresSellTimeByUser(addr), lastBlock.timestamp),
-    ScriptTransfer(i.caller, usdtAmount, usdtAssetId)] ++ prologActions, usdtAmount)
+  (limitActions :+
+    ScriptTransfer(i.caller, usdtAmount, usdtAssetId) ++ prologActions, usdtAmount)
 }
 
 # 50% USDT с контракта ACRES идут юзеру
 @Callable(i)
 func sellAcresREADONLY(address: String, acresAmount: Int) = {
-  let maxAcres = getSwapLimitAcres(address)
+  let (limitActions, maxAcres) = getSwapLimitAcres()
   let usdtAmount = acresAmount / USDT2ACRES_MULTIPLIER / 2
   ([], [usdtAmount, MULT7, maxAcres, 0])
 }
@@ -216,7 +212,7 @@ func convertOldStakes() = {
   } else {
     (0, 0, 0)
   }
-  let x = stakeAcresInternal(gotAcres0._1
+  let x = stakeUnstakeAcresInternal(gotAcres0._1
     + landsResult._1 + landsResult._2 + landsResult._3 + landsResult._4
     + duckResult._1 + duckResult._2 + duckResult._3, address) # (actions, wlgResult)
 
@@ -247,7 +243,7 @@ func unstakeLandsREADONLY(address: String) = {
 func stakeAcresCallback(addr: String) = {
   if (i.caller != oldStakingContractStr.addressFromStringValue()) then throw("Permission denied") else
 
-  stakeAcresInternal(i.payments[0].amount, addr) # (actions, wlgResult)
+  stakeUnstakeAcresInternal(i.payments[0].amount, addr) # (actions, wlgResult)
 }
 
 @Callable(i)

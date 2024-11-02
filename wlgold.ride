@@ -78,7 +78,7 @@ func claimInternal2(addr: String) = {
   let userTotal = userAmount + curStats[ixWlgUser10part]
 
   let issued10Amount = curStats[ixWlgIssue10Amount]
-  (teamTransfer ++ actTransfer ++ marketingTransfer ++ [
+  ([
     Reissue(wlgAssetId, issued10Amount, true),
     IntegerEntry(wlgIssuedAmountKey, curStats[ixWlgAmount] + issued10Amount),
     IntegerEntry(wlgIssue10TimeKey, curStats[ixWlgIssue10Time]),
@@ -90,7 +90,7 @@ func claimInternal2(addr: String) = {
     IntegerEntry(actAmountLeftKey, actAmountLeft - actAmount),
     IntegerEntry(lastActivitiesTimeKey, now),
     IntegerEntry(userTimeKey, userEffTime)
-  ], userTotal)
+  ] ++ teamTransfer ++ actTransfer ++ marketingTransfer, userTotal)
 }
 
 func takeXpInternal(addr: String, delta: Int) = {

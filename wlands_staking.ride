@@ -863,11 +863,11 @@ func constructorV1(restAddr: String) = {
   [StringEntry(keyRestAddress(), restAddr)]
 }
 
-@Callable(i)
-func saveInteger(key: String, amount: Int) = {
-  if (i.caller != this) then throw("saveInteger is not public method") else
-  [IntegerEntry(key, amount)]
-}
+# @Callable(i)
+# func saveInteger(key: String, amount: Int) = {
+#   if (i.caller != this) then throw("saveInteger is not public method") else
+#   [IntegerEntry(key, amount)]
+# }
 
 @Callable(i)
 func setBlocked(isBlocked: Boolean) = {
